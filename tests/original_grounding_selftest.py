@@ -93,15 +93,15 @@ class OriginalGroundingTests(unittest.TestCase):
             validate_current_review(changed, c, p, review)
         self.assertIn("lexical_diagnostic", r)
 
-    def test_call_error_stops_physical_requests_and_is_pending_not_bad(self):
+    def test_call_error_isolated_to_each_candidate_and_remains_pending(self):
         _, _, q, c, p = fixture()
         script = Scripted(RuntimeError("provider unavailable"))
         other = deepcopy(q); other["qid"] += "_second"
         kept, r, review = review_grounding([q, other], c, p, chat_json=script, model="test")
-        self.assertEqual(len(script.calls), 1)
+        self.assertEqual(len(script.calls), 2)
         self.assertEqual(r["n_dropped"], 0)
         self.assertEqual(r["n_pending"], 2)
-        self.assertTrue(r["execution_stopped"])
+        self.assertFalse(r["execution_stopped"])
         self.assertEqual(kept, [])
 
     def test_bad_reference_is_rejected_without_overwriting_it(self):

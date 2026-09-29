@@ -12,8 +12,23 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 from pipeline import disclosure as d, world_semantics as review
+from execution_control import ExecutionStopped
 from pipeline.world_context import ReadWindow, ProgressGuard
 from world_semantics_selftest import fixture
+
+
+def complete_opinions(payload):
+    """Complete offline opinions for parser-control tests, never a quality claim."""
+    world_ref = next(row["ref_id"] for row in payload["reference_index"]
+                     if row["source"] == "world" and row["json_pointer"].startswith("/entities/"))
+    return {"mechanism_coverage": [{"mechanism_id": row["id"], "status": "witnessed",
+                "refs": [world_ref], "observed_sequence": "Offline parser fixture.",
+                "reason": "Only verifies transport and parser control."}
+            for row in payload["seed"]["mechanisms"]],
+            "disclosure_reviews": [{"record_id": row["record_id"], "status": "compatible",
+                "understanding": "Offline parser fixture.", "refs": [row["record_ref_id"]],
+                "reason": "Only verifies complete original record attribution."}
+            for row in payload.get("disclosure_record_contexts", [])]}
 
 
 class ScopedAgentFixture:
@@ -193,6 +208,33 @@ class Tests(unittest.TestCase):
                                   "error_type": "ValueError",
                                   "message": "invalid finish action"}])
 
+    def test_scoped_review_propagates_global_stop_after_original_call(self):
+        self.author()
+        class Stopped:
+            calls = 0
+            def chat_json(self, *_args, **_kwargs):
+                self.calls += 1
+                return {"__error__": "budget admission stopped",
+                        "__error_metadata__": {"kind": "estimated_budget_limit", "global_stop": True}}
+        tracer = Stopped()
+        with self.assertRaises(ExecutionStopped) as caught:
+            review.review_world(self.wp, self.ws, tracer, self.task)
+        self.assertEqual(tracer.calls, 1)
+        self.assertEqual(caught.exception.kind, "estimated_budget_limit")
+
+    def test_plain_review_propagates_global_stop_but_preserves_local_error_receipt(self):
+        self.author()
+        class Stopped:
+            def __init__(self, kind): self.kind = kind
+            def chat_json(self, *_args, **_kwargs):
+                return {"__error__": "provider call failed", "__error_metadata__": {"kind": self.kind}}
+        with patch("pipeline.world_context.enabled", return_value=False):
+            with self.assertRaises(ExecutionStopped):
+                review.review_world(self.wp, self.ws, Stopped("http_status_401"), self.task)
+            local = review.review_world(self.wp, self.ws, Stopped("http_connect_error"), self.task)
+        self.assertEqual(local["status"], "error")
+        self.assertEqual(local["repair_targets"], {"intrinsic": [], "structure": False})
+
     def test_cannot_arrange_unread_fact_and_can_recover_with_actual_read(self):
         class Recover(ScopedAgentFixture):
             def chat_json(self, step, messages, **params):
@@ -341,7 +383,7 @@ class Tests(unittest.TestCase):
         self.assertTrue(advance)
         self.assertEqual(state["issues"], [old])
         window.read = set(window.nodes)
-        with self.assertRaisesRegex(ValueError, "output finish"):
+        with self.assertRaisesRegex(ValueError, "submit missing opinions"):
             review._review_action(
                 action, window, state, payload, allow_revision=True,
                 revision_reason="premature finish")
@@ -355,6 +397,8 @@ class Tests(unittest.TestCase):
             checkpoint.write_text(json.dumps({
                 "identity": "historical", "transcript": old_rows,
                 "hash": review._hash(old_rows), "legacy_resume_prefix": 3,
+                "input_binding": review._hash(review._review_checkpoint_inputs(
+                    self.wp, self.ws, self.task, None, None, "cheap-review")),
             }), encoding="utf-8")
             tracer = SimpleNamespace(pfile=folder / "prompts.jsonl")
             calls = []
@@ -431,7 +475,7 @@ class Tests(unittest.TestCase):
                  "alternative_reading": "全部读取后重新判断。", "disposition": "unresolved"}
         state = {"issues": [early], "mechanism_coverage": [], "disclosure_reviews": [],
                  "note": "早期进度意见", "revisions": []}
-        raw = {"mechanism_coverage": [], "disclosure_reviews": [], "issues": [],
+        raw = {**complete_opinions(payload), "issues": [],
                "repair_targets": {"intrinsic": [], "structure": False, "disclosure": False},
                "limitations": "全部原始节点已读取。", "reason": "最终没有阻断问题。",
                "decision": "accept"}
@@ -453,12 +497,13 @@ class Tests(unittest.TestCase):
         full = {"record_id": record["record_id"], "understanding": "已提交完整理解。",
                 "refs": [record["record_ref_id"]], "reason": "完整依据已在前一批提交。",
                 "status": "compatible"}
-        state = {"issues": [], "mechanism_coverage": [],
-                 "disclosure_reviews": [deepcopy(full)], "note": "此前批次",
+        opinions = complete_opinions(payload)
+        opinions["disclosure_reviews"][0] = deepcopy(full)
+        state = {"issues": [], **deepcopy(opinions), "note": "此前批次",
                  "revisions": []}
-        raw = {"mechanism_coverage": [],
-               "disclosure_reviews": [{"record_id": full["record_id"],
-                                        "status": "compatible"}],
+        raw = {"mechanism_coverage": deepcopy(opinions["mechanism_coverage"]),
+               "disclosure_reviews": [{"record_id": row["record_id"], "status": row["status"]}
+                                      for row in opinions["disclosure_reviews"]],
                "issues": [],
                "repair_targets": {"intrinsic": [], "structure": False,
                                   "disclosure": False},
@@ -467,7 +512,7 @@ class Tests(unittest.TestCase):
         with patch.object(review, "_parse") as parse:
             result, advance = review._review_action(raw, window, state, payload)
         self.assertFalse(advance)
-        self.assertEqual(result["disclosure_reviews"], [full])
+        self.assertEqual(result["disclosure_reviews"], opinions["disclosure_reviews"])
         parse.assert_called_once()
 
     def test_finish_reaffirms_consolidated_opinion_after_last_transport_read(self):
@@ -482,7 +527,7 @@ class Tests(unittest.TestCase):
                  "alternative_reading": "读完后可撤回。", "disposition": "unresolved"}
         state = {"issues": [early], "mechanism_coverage": [], "disclosure_reviews": [],
                  "note": "早期进度", "revisions": []}
-        consolidated = {"mechanism_coverage": [], "disclosure_reviews": [], "issues": [],
+        consolidated = {**complete_opinions(payload), "issues": [],
                         "repair_targets": {"intrinsic": [], "structure": False,
                                            "disclosure": False},
                         "limitations": "完整意见已形成。", "reason": "当前结论通过。",

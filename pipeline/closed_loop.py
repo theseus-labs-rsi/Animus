@@ -133,6 +133,19 @@ def _scale_world_contract(wp: dict, n_entities: int, n_sessions: int,
         seed_floors = _seed_type_floors(wp)
         for t, count in zip(types, counts):
             t["count"] = max(count, seed_floors.get(t.get("id"), 0))
+        # Rounding by proportions and then applying seed floors can overfill a
+        # feasible target. Reclaim only scalable surplus; preserve every type,
+        # seed minimum, exact cardinality and distinct-event-role requirement.
+        role_floors = event_role_requirements(bp)
+        floors = {i: max(1, seed_floors.get(types[i].get("id"), 0),
+                         role_floors.get(types[i].get("id"), 0)) for i in scalable}
+        excess = sum(int(t["count"]) for t in types) - desired
+        donors = sorted(scalable, key=lambda i: (int(types[i]["count"]) - floors[i],
+                                                 int(types[i]["count"])), reverse=True)
+        for i in donors:
+            take = min(max(0, excess), max(0, int(types[i]["count"]) - floors[i]))
+            types[i]["count"] -= take
+            excess -= take
         actual_entities = sum(int(t.get("count", 0)) for t in types)
         temporal = bp.setdefault("temporal_model", {})
         # 时间跨度与实体规模一样服从本轮旋钮；build_to_target 后续轮只会放大参数，
@@ -425,8 +438,8 @@ def build_to_target(run: Run, spec: TargetSpec, max_rounds: int = 2, order_subro
       stage 体零复制(评审:避免第二条编排路径漂移);quota 经 run.config 喂给 stage_orders。
     一轮 = ①订单供给环(stage_world+stage_orders 多子轮长世界) → 出题 → 整轮重渲 → 接地 → ② floor 校验/纠偏。
     达标 MET 才发布；耗尽 max_rounds 或硬下限不可行时保留审计产物并明确失败。"""
-    from pipeline.factory import (stage_world, stage_orders, stage_well_posed,
-                                  stage_questions, stage_corpus, stage_grounding,
+    from pipeline.factory import (stage_world, stage_disclosure, stage_orders, stage_well_posed,
+                                  run_generation_tail,
                                   ART, CORPUS_CKPT)
     wp = run.read(ART["whitepaper"])
     canon_lines = [{**l, "line": line_for(l.get("line", "")).id}                  # ★白皮书线 id 变体 → 规范 id(与 by_line / 先验键对齐)
@@ -464,7 +477,10 @@ def build_to_target(run: Run, spec: TargetSpec, max_rounds: int = 2, order_subro
             _scale_world_contract(wp, params.n_entities, params.n_sessions,
                                   narrative=narrative_mode)                           # patch 规模旋钮；显式蓝图同步更新 primary/time
             if sum(int(t.get("count", 0)) for t in (wp.get("world_blueprint") or {}).get("entity_types", [])) > spec.max_world_entities:
-                raise WorldBlueprintError("Seed entity minima exceed this run's max_world_entities")
+                allocated = sum(int(t.get("count", 0)) for t in wp["world_blueprint"]["entity_types"])
+                raise WorldBlueprintError(
+                    f"World allocation has {allocated} entities after seed/type constraints; "
+                    f"max_world_entities={spec.max_world_entities}. Check required type/cardinality minima.")
             event_role_moves = _ensure_event_role_capacity(wp)
             if event_role_moves:
                 run.log(f"║  事件角色互异容量：总实体不变，类型重分配 {event_role_moves}")
@@ -483,6 +499,7 @@ def build_to_target(run: Run, spec: TargetSpec, max_rounds: int = 2, order_subro
             feasible: set = set()
             for sub in range(1, order_subrounds + 1):
                 _run_world_attempt(run, wp, stage_world, ART, CORPUS_CKPT)
+                _run_stage(run, "disclosure", stage_disclosure, ART["disclosure"])
                 _run_stage(run, "orders", stage_orders, ART["orders"])
                 _run_stage(run, "well_posed", stage_well_posed, "03_well_posed_report.json")  # ★边A闸:赤字按【良定义后】供给算
                 ws = WorldState.from_dict(run.read(ART["world"]))
@@ -526,7 +543,6 @@ def build_to_target(run: Run, spec: TargetSpec, max_rounds: int = 2, order_subro
                 run.log(f"║  ⚠ 订单硬下限未满足:{order_shortfall}；继续让现有订单走完出题、语料、接地和质量阶段")
 
             # ── 出题 → 渲染(round1 全量;round2+ ★增量 delta:只渲新实体、旧 docs 原样保留,§10.1)→ 接地 ──
-            _run_stage(run, "questions", stage_questions, ART["questions"])
             ws = WorldState.from_dict(run.read(ART["world"]))
             if rnd == 1 or narrative_mode:
                 run_cfg.pop("render_only", None)
@@ -536,7 +552,7 @@ def build_to_target(run: Run, spec: TargetSpec, max_rounds: int = 2, order_subro
                 prev_events = {_event_key(e) for e in ws.events}
                 # 全量重渲只清中断点；旧正式 05 保留到 stage_corpus 成功后原子替换。
                 (run.dir / CORPUS_CKPT).unlink(missing_ok=True)
-                _run_stage(run, "corpus", stage_corpus, ART["corpus"])
+                run_generation_tail(run)
             else:
                 new_ents, touched_pairs = _render_delta_scope(
                     ws, prev_entities, prev_relations, prev_events)
@@ -544,14 +560,13 @@ def build_to_target(run: Run, spec: TargetSpec, max_rounds: int = 2, order_subro
                 run_cfg["render_only_pairs"] = touched_pairs
                 run.log(f"║  增量续渲:+{len(new_ents)} 新实体全程 + {len(touched_pairs)} 个旧实体·结构变化期")
                 try:
-                    _run_stage(run, "corpus", stage_corpus, ART["corpus"])
+                    run_generation_tail(run)
                 finally:
                     _update_run_metadata(
                         run, config_remove=("render_only", "render_only_pairs"))
                 prev_entities = set(ws.entities)
                 prev_relations = {_relation_key(r) for r in ws.relations}
                 prev_events = {_event_key(e) for e in ws.events}
-            _run_stage(run, "grounding", stage_grounding, ART["grounding"])
 
             # ── ② floor 校验(读回 stage 产物判定;driver 只做循环决策)──
             report = run.read("06_grounding_report.json")

@@ -9,9 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # 允许 `python pipeline/render.py` 直跑(找到根目录 config)
 import config
+from execution_control import CallGate
+from pipeline.task_execution import JournaledTracer
 from pipeline.world_state import _date_of, week_label, _to_num, _dicts, EXPIRE, DELETE
 from pipeline.lines import line_for
 from pipeline.prompts import render
+from pipeline import evidence_transport as wire
 from pipeline.story import replay_story_ledger, review_narrative_supportedness
 
 
@@ -22,6 +25,162 @@ LEAK_BANNED = ["当前", "现在", "最新", "目前", "截至目前", "迄今",
 FILLER_TEXT_MAX_TOKENS = 16_384
 DISCRIMINATOR_MAX_TOKENS = 16_384
 SIGNAL_MAX_TOKENS = 16_384
+
+
+def _signal_document_shape_issues(out):
+    """Describe model document shape defects without filling any business prose."""
+    if not isinstance(out, dict):
+        return ["response must be a JSON object containing docs"]
+    docs = out.get("docs")
+    if not isinstance(docs, list) or not docs:
+        return ["docs must be a nonempty array"]
+    issues = []
+    for index, doc in enumerate(docs):
+        if not isinstance(doc, dict):
+            issues.append(f"docs[{index}] must be a document object")
+        elif not isinstance(doc.get("content"), str) or not doc["content"].strip():
+            issues.append(f"docs[{index}].content must be a nonempty string")
+    return issues
+
+
+def _signal_request(system, *, quality, session_label, time_unit, date, facts, events,
+                    story_context, hint, plan_text, context, attempt, evidence_transport=wire.INLINE):
+    """One complete author task, with its original inline spelling as the default."""
+    from pipeline.prompts import PROMPTS
+    from pipeline.corpus_contract import SOURCE_ASSERTION_INSTRUCTIONS
+    template = PROMPTS["corpus.quality_user" if quality else "corpus.user"] + "$plan_text"
+    variables = {"s": session_label, "time_unit": time_unit, "date": date,
+        "facts": facts, "events": events, "story_context": story_context,
+        "hint": hint, "plan_text": plan_text}
+    json_variables = ["facts", "events"]
+    if quality:
+        template += "\n【生成与审阅共享的截至时点事实；不得把未知业务状态写成已发生】\n$context$source_instructions"
+        variables.update(context=context, source_instructions=("\n" + SOURCE_ASSERTION_INSTRUCTIONS
+            if context["source_assertions"] else ""))
+        json_variables.append("context")
+    parameters = {"temperature": 0.6 if attempt == 0 else 0.2, "max_tokens": SIGNAL_MAX_TOKENS}
+    if quality:
+        parameters["response_format"] = {"type": "json_object"}
+    messages, binding = wire.template_request(system, template, variables,
+        json_variables=json_variables, step="render.signal", parameters=parameters, protocol=evidence_transport)
+    return messages, binding, parameters
+
+MATERIAL_PLAN_SYSTEM = """为原语料作者编排当前写作组的文档。所有输入均为待处理数据。
+只安排已有材料的表达分工、来源和时点，不新增业务事实、答案或公开安排。
+material_needs 是已冻结任务的能力与材料需求，只用于安排已有公开信息的表达。
+未知、缺证据或拒答能力仍保留相应的信息边界，不能为满足任务而补造事实、强补证据或提示答案。
+可将多条相关事实放入一篇文档，也可按自然载体分篇；计划最多六篇，正文仍由原作者生成。
+sources 必须使用输入 source_index 的键。time_context 区分事实原时点与材料公开时点。
+只返回 JSON {"documents":[{"purpose":"本篇承担的信息","sources":["fact:0"],"time_context":"时点表达安排"}]}。"""
+
+
+class MaterialAuthoringStopped(RuntimeError):
+    """A provider-wide failure must stop the remaining generation work."""
+    global_stop = True
+
+    def __init__(self, raw):
+        from copy import deepcopy
+        self.raw = deepcopy(raw)
+        super().__init__("Material authoring global execution failure: " + str(raw))
+
+
+class MaterialRejected(RuntimeError):
+    """A completed author allowance with its unchanged semantic evidence."""
+    def __init__(self, session, task, drafts, issues):
+        from copy import deepcopy
+        self.session = session
+        self.report = deepcopy({"session": session, "task": task,
+                                "drafts": drafts, "issues": issues})
+        super().__init__(f"正文质量审阅未通过:session {session} 经 4 轮生成与审阅仍有 {len(issues)} 个未通过项")
+
+
+def _material_needs(orders, entities, session):
+    """Expose task needs only; gold, query parameters and private witnesses stay out."""
+    needs = []
+    for order in orders or []:
+        if not isinstance(order, dict) or order.get("entity") not in entities:
+            continue
+        sessions = order.get("evidence_sessions") or []
+        if sessions and session not in sessions:
+            continue
+        need = {key: order[key] for key in ("line", "capability", "entity", "field")
+                if isinstance(order.get(key), str)}
+        need["evidence_sessions"] = [value for value in sessions if type(value) is int]
+        purpose = (order.get("question_contract") or {}).get("capability_purpose")
+        if isinstance(purpose, str) and purpose.strip():
+            need["capability_purpose"] = purpose
+        if need not in needs:
+            needs.append(need)
+    return needs
+
+
+def _plan_signal(tracer, progress, save_progress, *, facts, events, context, session, date,
+                 material_needs=()):
+    """One optional physical authoring call, durably admitted before dispatch.
+
+    A lost response never earns another planning allowance on resume. The
+    existing author can work directly from the same facts if planning fails.
+    """
+    from copy import deepcopy
+    from pipeline.grounding_review import _local_execution_failure
+    existing = progress.get("planning")
+    if existing is not None:
+        if existing.get("status") == "admitted":
+            existing.update(status="fallback", reason="response_not_persisted")
+            save_progress()
+        return existing.get("plan") if existing.get("status") == "planned" else None
+    sources = {f"fact:{index}": fact for index, fact in enumerate(facts)}
+    sources.update({f"event:{index}": event for index, event in enumerate(events)})
+    sources.update({f"source:{index}": source for index, source in enumerate(context.get("source_assertions", []))})
+    payload = {"session": session, "document_date": date, "source_index": sources,
+               "public_context": context, "material_needs": list(material_needs)}
+    encoded = json.dumps(payload, ensure_ascii=False)
+    if len(encoded) > 32_000:
+        progress["planning"] = {"status": "fallback", "reason": "optional_planning_input_too_large"}
+        save_progress()
+        return None
+    state = progress["planning"] = {"status": "admitted", "raw_output": None}
+    save_progress()
+    try:
+        output = tracer.chat_json("render.plan", [{"role": "system", "content": MATERIAL_PLAN_SYSTEM},
+            {"role": "user", "content": encoded}], temperature=0.3,
+            max_tokens=2048, retries=1, strict_json=True,
+            response_format={"type": "json_object"})
+    except Exception as error:
+        state.update(status="failed", reason=f"{type(error).__name__}: {error}")
+        save_progress()
+        raw = {"__error__": str(error), "__error_metadata__": {"kind": config.chat_error_kind(error)}}
+        if isinstance(error, TimeoutError) or _local_execution_failure(raw):
+            state["status"] = "fallback"
+            save_progress()
+            return None
+        raise MaterialAuthoringStopped(raw) from error
+    state["raw_output"] = deepcopy(output)
+    if isinstance(output, dict) and "__error__" in output:
+        metadata = output.get("__error_metadata__") or {}
+        local = (_local_execution_failure(output) or metadata.get("kind") == "unclassified_timeout"
+                 or metadata.get("error_type") in {"TimeoutError", "JSONDecodeError"})
+        state.update(status="fallback" if local else "failed", reason="planning_execution_error")
+        save_progress()
+        if local:
+            return None
+        from pipeline.question_wording import QuestionAuthoringExecutionError
+        raise MaterialAuthoringStopped(output) from QuestionAuthoringExecutionError(output)
+    rows = output.get("documents") if isinstance(output, dict) else None
+    if (not isinstance(rows, list) or not 1 <= len(rows) <= 6 or any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("purpose"), str) or not row["purpose"].strip()
+            or not isinstance(row.get("time_context"), str) or not row["time_context"].strip()
+            or not isinstance(row.get("sources"), list) or not row["sources"]
+            or any(not isinstance(ref, str) or ref not in sources for ref in row["sources"])
+            for row in (rows if isinstance(rows, list) else []))):
+        state.update(status="fallback", reason="invalid_planning_shape_or_reference")
+        save_progress()
+        return None
+    plan = {"documents": [{key: row[key] for key in ("purpose", "sources", "time_context")} for row in rows]}
+    state.update(status="planned", plan=plan)
+    save_progress()
+    return plan
 
 # filler 是无关草堆，没有生成凭据形态 token 的业务理由。这里只拦常见、足够长的
 # 机器凭据前缀，不尝试做复杂“秘密检测”，避免把普通连字符文本误判。
@@ -80,31 +239,49 @@ def _discriminate_many(docs, queries: list[dict], tracer, *, semantic=False) -> 
         system += ("\n查询中的 fact_session/fact_date 指事实成立的原时点，不是材料公开日期。"
                    "同一实体字段可以有不同历史时点的多个查询，请按各自时点阅读；"
                    "disclosure_id/target_ref 只用于区分查询，不含答案也不是正文证据。")
-    out = tracer.chat_json(
-        "render.discriminate",
-        [{"role": "system", "content": system},
-         {"role": "user", "content": render(
-             "discriminate.quality_user" if semantic else "discriminate.user",
-             docs="\n\n".join(d for d in docs if d),
-             queries=json.dumps(queries, ensure_ascii=False))}],
-        temperature=0.0, max_tokens=DISCRIMINATOR_MAX_TOKENS, model=config.DISCRIMINATOR_MODEL,
-        **({"response_format": {"type": "json_object"}} if semantic else {}))
-    if not isinstance(out, dict) or "__error__" in out:
-        detail = out.get("__error__", "非 JSON object") if isinstance(out, dict) else "非 JSON object"
-        raise RuntimeError(f"render.discriminate 调用失败:{detail}")
-    rows = out.get("answers")
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": render(
+                    "discriminate.quality_user" if semantic else "discriminate.user",
+                    docs="\n\n".join(d for d in docs if d),
+                    queries=json.dumps(queries, ensure_ascii=False))}]
     expected = [str(query.get("key")) for query in queries]
-    if not isinstance(rows, list) or any(
-            not isinstance(row, dict)
-            or row.get("key") is None
-            or row.get("answer") is None
-            for row in (rows if isinstance(rows, list) else [])):
-        raise RuntimeError("render.discriminate 协议失败:answers 必须是完整对象数组")
-    keys = [str(row["key"]) for row in rows]
-    if len(keys) != len(set(keys)) or set(keys) != set(expected):
-        raise RuntimeError(
-            f"render.discriminate 协议失败:期望 keys={expected},实际 keys={keys}")
-    return {str(row["key"]): str(row["answer"]) for row in rows}
+    request = messages
+    # At most three schema responses, each with the existing three JSON
+    # attempts: at most nine physical requests, all charged by the same tracer.
+    # A complete answer (including wrong/uncertain answers) returns immediately.
+    for protocol_attempt in range(3):
+        out = tracer.chat_json("render.discriminate", request,
+            temperature=0.0, max_tokens=DISCRIMINATOR_MAX_TOKENS, model=config.DISCRIMINATOR_MODEL,
+            retries=3, **({"response_format": {"type": "json_object"}} if semantic else {}))
+        if isinstance(out, dict) and "__error__" in out:
+            from execution_control import global_stop_exception
+            stopped = global_stop_exception(out)
+            if stopped is not None:
+                raise stopped
+            raise RuntimeError(f"render.discriminate 调用失败:{out['__error__']}")
+        issues = []
+        rows = out.get("answers") if isinstance(out, dict) else None
+        if not isinstance(out, dict):
+            issues.append("response must be a JSON object")
+        if not isinstance(rows, list) or any(
+                not isinstance(row, dict) or row.get("key") is None
+                or not isinstance(row.get("answer"), (str, int, float, bool))
+                for row in (rows if isinstance(rows, list) else [])):
+            issues.append("answers must contain complete key/answer objects with scalar answers")
+        if not issues:
+            keys = [str(row["key"]) for row in rows]
+            if len(keys) != len(set(keys)) or set(keys) != set(expected):
+                issues.append(f"expected keys={expected}, actual keys={keys}; each key is required exactly once")
+        if not issues:
+            return {str(row["key"]): str(row["answer"]) for row in rows}
+        if protocol_attempt == 2:
+            raise RuntimeError("render.discriminate 协议失败:3 schema attempts exhausted: " + "; ".join(issues))
+        request = messages + [{"role": "assistant", "content": json.dumps(out, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps({"protocol_feedback": {
+                "issues": issues, "instruction": "Return the complete answers for the original documents and queries. "
+                "Correct only the output protocol; uncertain or negative answers are allowed. "
+                "No expected values or new evidence are supplied."}}, ensure_ascii=False)}]
+
 
 
 def _discriminator_recovers(docs, entity, field, true_value, tracer):
@@ -200,12 +377,13 @@ def corpus_scale(corpus, target_chars=0, haystack_ratio=None):
 
 
 def _top_up_haystack(corpus, target_chars, ratio, tracer, system, blocked,
-                    time_unit, save_cb, log=print):
+                    time_unit, save_cb, log=print, filler_writer=None):
     """Append bounded batches; preserve every accepted sibling before errors."""
     stats = corpus_scale(corpus, target_chars, ratio)
     sessions = corpus.get("sessions", [])
     if stats["target_met"] or not sessions:
         return
+    filler_writer = filler_writer or _FillerWriter(tracer)
     # Initial estimate gives a finite call allowance even for very short output.
     average = stats["filler_chars"] / max(1, stats["filler_documents"])
     estimate = max(400, min(1200, average or 800))
@@ -224,29 +402,17 @@ def _top_up_haystack(corpus, target_chars, ratio, tracer, system, blocked,
 
         def write_one(job):
             session, slot = job
-            try:
-                out = tracer.chat_text("render.filler",
-                    [{"role": "system", "content": system},
-                     {"role": "user", "content": render("filler.user", s=week_label(session["session_id"]),
-                                time_unit=time_unit, date=session.get("date", ""), slot=slot)}],
-                    temperature=0.9, max_tokens=FILLER_TEXT_MAX_TOKENS)
-                # The tracer represents transport/budget failures as records.
-                # Stop this pass after saving siblings; retry belongs to resume.
-                if isinstance(out, dict) and "__error__" in out:
-                    return session, [], RuntimeError(str(out["__error__"]))
-                try:
-                    return session, _accept_filler_text(out, blocked), None
-                except RuntimeError:
-                    return session, [], None
-            except Exception as exc:
-                return session, [], exc
+            docs = filler_writer(tracer,
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": render("filler.user", s=week_label(session["session_id"]),
+                            time_unit=time_unit, date=session.get("date", ""), slot=slot)}],
+                blocked)
+            return session, docs
 
-        rows = config.pmap(write_one, jobs, workers=8)
-        used += count
-        accepted, errors = 0, []
-        for session, docs, error in rows:
-            if error is not None:
-                errors.append(error)
+        accepted = 0
+        def commit_result(row):
+            nonlocal accepted
+            session, docs = row
             for doc in docs:
                 index = len(session["docs"])
                 doc_id = f"s{session['session_id']}_fil_topup_{index}"
@@ -257,13 +423,13 @@ def _top_up_haystack(corpus, target_chars, ratio, tracer, system, blocked,
                 doc.update(doc_id=doc_id, is_filler=True, fact_refs=[])
                 session["docs"].append(doc)
                 accepted += 1
-        if accepted:
-            save_cb()
+            if docs:
+                save_cb()
+        config.pmap(write_one, jobs, workers=8, on_result=commit_result)
+        used += count
         stats = corpus_scale(corpus, target_chars, ratio)
         log(f"  草堆补量:本批接受 {accepted}/{count} 篇，总字符 {stats['total_chars']}，"
             f"草堆占比 {stats['filler_share']:.1%}，尚缺 {stats['deficit_chars']} 字")
-        if errors:
-            raise errors[0]
         if not accepted:
             break
         average = stats["filler_chars"] / max(1, stats["filler_documents"])
@@ -271,6 +437,150 @@ def _top_up_haystack(corpus, target_chars, ratio, tracer, system, blocked,
     if not stats["target_met"]:
         log(f"  ⚠ 语料规模目标未达成，保留已生成正文；欠额 {stats['deficit_chars']} 字，"
             f"本次补量调用 {used}/{allowance}")
+
+
+class CorpusTokenTargetUnmet(RuntimeError):
+    """The bounded token top-up ended with a measured deficit."""
+
+
+def _top_up_haystack_tokens(corpus, target, ratio, tracer, system, blocked,
+                           time_unit, save_cb, token_state, token_save_cb,
+                           counter, log=print, filler_writer=None):
+    """Checkpoint token counts and admitted jobs; exact prompts survive resume."""
+    from copy import deepcopy
+    from pipeline.corpus_tokens import plan_filler_batch
+    from pipeline.semantic_review import fingerprint
+    if not isinstance(token_state, dict):
+        raise ValueError("token_state must be a mutable dictionary")
+    key = fingerprint({"target_tokens": target, "haystack_ratio": ratio,
+                       "tokenizer_id": counter.tokenizer_id})
+    previous_cache = token_state.get("measurement", {}).get("cache")
+    if token_state.get("plan_hash") != key:
+        token_state.clear()
+        token_state.update(version="corpus-token-scale/v1", plan_hash=key,
+                           target_tokens=target, haystack_ratio=ratio,
+                           tokenizer=deepcopy(counter.tokenizer), tokenizer_id=counter.tokenizer_id,
+                           topup={"admitted_jobs": 0, "completed_batches": 0,
+                                  "low_yield_batches": 0, "pending_jobs": []})
+    ledger = token_state["topup"]
+
+    def measure_save():
+        nonlocal previous_cache
+        measurement = counter.measure(corpus, cache=previous_cache)
+        previous_cache = measurement["cache"]
+        plan = plan_filler_batch(measurement, target, ratio, max_documents=8,
+                                 default_document_tokens=1000)
+        token_state.update(measurement=measurement, plan=plan, target_met=plan["target_met"],
+                           deficit_tokens=plan["remaining_filler_tokens"],
+                           total_tokens=measurement["total"]["tokens"],
+                           total_characters=measurement["total"]["characters"],
+                           attempt_complete=False)
+        save_cb()
+        if token_save_cb:
+            token_save_cb(deepcopy(token_state))
+        return measurement, plan
+
+    measured, plan = measure_save()
+    sessions = {session["session_id"]: session for session in corpus["sessions"]}
+    if plan["target_met"]:
+        token_state["attempt_complete"] = True
+        if token_save_cb:
+            token_save_cb(deepcopy(token_state))
+        return
+    if not sessions:
+        raise CorpusTokenTargetUnmet("Token target requires at least one completed corpus period")
+    estimate = max(400, min(1600, plan["estimated_tokens_per_document"]))
+    # Frozen allowance survives resume, including rejected/empty responses.
+    ledger.setdefault("job_allowance", 2 * ceil(plan["remaining_filler_tokens"] / estimate) + 8)
+    filler_writer = filler_writer or _FillerWriter(tracer)
+    session_ids = list(sessions)
+    while not plan["target_met"]:
+        if len(ledger.get("provider_rejected_jobs", [])) > 3:
+            raise FillerExecutionError({"__error__": "Background-document provider rejection limit exceeded"})
+        jobs = ledger["pending_jobs"]
+        if not jobs:
+            available = ledger["job_allowance"] - ledger["admitted_jobs"]
+            if available <= 0 or ledger["low_yield_batches"] >= 2:
+                break
+            count = min(8, available, max(1, ceil(plan["remaining_filler_tokens"] / estimate)))
+            filler_stats = measured["filler"]
+            basis = filler_stats if filler_stats["tokens"] else measured["total"]
+            chars_per_token = (basis["characters"] / basis["tokens"] if basis["tokens"] else 1.0)
+            token_hint = max(1, min(ceil(estimate), ceil(plan["remaining_filler_tokens"] / count)))
+            char_hint = max(64, min(4096, ceil(token_hint * chars_per_token)))
+            for _ in range(count):
+                index = ledger["admitted_jobs"]
+                sid = session_ids[index % len(session_ids)]
+                user = render("filler.user", s=week_label(sid), time_unit=time_unit,
+                              date=sessions[sid].get("date", ""), slot=f"token-{index}-{key[:12]}")
+                user += (f"\n本篇长度提示覆盖常规长度：正文约 {char_hint} 字符，"
+                         f"对应约 {token_hint} 个 {counter.tokenizer['encoding']} token。"
+                         "只输出自然正文；实际规模由程序计数。")
+                jobs.append({"index": index, "session_id": sid,
+                             "doc_id": f"s{sid}_fil_token_{key[:12]}_{index}", "user": user,
+                             "expected_tokens": token_hint})
+                ledger["admitted_jobs"] += 1
+            measure_save()  # Admission and exact continuation messages precede dispatch.
+
+        def write_one(job):
+            session = sessions[job["session_id"]]
+            if any(doc.get("doc_id") == job["doc_id"] for doc in session["docs"]):
+                return job, [], None
+            try:
+                return job, filler_writer(tracer,
+                    [{"role": "system", "content": system +
+                      "\n本次采用用户给出的本篇长度提示，替代上方常规正文长度。"},
+                     {"role": "user", "content": job["user"]}], blocked), None
+            except FillerContentRejected as error:
+                return job, [], error
+
+        before_tokens = measured["total"]["tokens"]
+        expected_tokens = sum(job["expected_tokens"] for job in jobs)
+        content_omitted = False
+        def commit_result(row):
+            nonlocal content_omitted
+            job, docs, error = row
+            if error is not None:
+                content_omitted = True
+                rejected = ledger.setdefault("provider_rejected_jobs", [])
+                if not any(row["doc_id"] == job["doc_id"] for row in rejected):
+                    rejected.append({"doc_id": job["doc_id"], "index": job["index"],
+                                     "error": error.raw, "action": "omit_background_slot_without_retry"})
+            session = sessions[job["session_id"]]
+            known = {doc.get("doc_id") for doc in session["docs"]}
+            for index, doc in enumerate(docs):
+                identity = job["doc_id"] if index == 0 else f"{job['doc_id']}_{index}"
+                if identity not in known:
+                    doc.update(doc_id=identity, is_filler=True, fact_refs=[])
+                    session["docs"].append(doc)
+                    known.add(identity)
+            ledger["pending_jobs"] = [pending for pending in ledger["pending_jobs"]
+                                      if pending["doc_id"] != job["doc_id"]]
+            measure_save()
+            if error is not None and len(ledger["provider_rejected_jobs"]) > 3:
+                raise error
+        config.pmap(write_one, list(jobs), workers=8, on_result=commit_result)
+        ledger["completed_batches"] += 1
+        measured, plan = measure_save()
+        gain = measured["total"]["tokens"] - before_tokens
+        if not content_omitted:
+            ledger["low_yield_batches"] = (ledger["low_yield_batches"] + 1
+                                             if gain < max(1, expected_tokens // 10) else 0)
+            if gain == 0:
+                ledger["low_yield_batches"] = 2
+        measure_save()
+        log(f"  token 草堆补量:正文 {measured['total']['tokens']} token / "
+            f"{measured['total']['characters']} 字符，尚缺 {plan['remaining_filler_tokens']} token")
+        estimate = max(400, min(1600, plan["estimated_tokens_per_document"]))
+    token_state["attempt_complete"] = True
+    save_cb()
+    if token_save_cb:
+        token_save_cb(deepcopy(token_state))
+    if not plan["target_met"]:
+        raise CorpusTokenTargetUnmet(
+            f"Corpus token target unmet: {plan['remaining_filler_tokens']} token remaining; "
+            f"admitted filler jobs {ledger['admitted_jobs']}/{ledger['job_allowance']}; "
+            f"low-yield batches={ledger['low_yield_batches']}")
 
 
 def _session_facts(ws, s):
@@ -355,6 +665,166 @@ def _accept_filler_text(out, blocked) -> list[dict]:
     if _CREDENTIAL_TOKEN_RE.search(content):
         raise RuntimeError("render.filler 命中凭据形态 token")
     return [{"type": "背景干扰文档", "content": content}]
+
+
+class FillerExecutionError(RuntimeError):
+    """A single filler exhausted its durable transport allowance."""
+
+    def __init__(self, raw):
+        self.raw = raw
+        self.kind = (raw.get("__error_metadata__") or {}).get("kind") if isinstance(raw, dict) else None
+        super().__init__(str(raw))
+
+
+class FillerContentRejected(FillerExecutionError):
+    """An explicitly rejected background slot is retained as evidence and omitted."""
+
+
+class _FillerWriter:
+    """Persist each body before period assembly; three dispatches across resumes.
+
+    Old successful text calls are reusable only with identical messages/model/
+    call parameters and a fresh filler-content check. No review is imported.
+    """
+
+    def __init__(self, tracer):
+        from pipeline.semantic_review import fingerprint
+        self._fingerprint = fingerprint
+        pfile = getattr(tracer, "pfile", None)
+        self.directory = pfile.parent / "05_filler_checkpoints" if isinstance(pfile, Path) else None
+        self._locks, self._states, self._traces = {}, {}, {}
+        self._lock = threading.Lock()
+        self.params = {"temperature": 0.9, "max_tokens": FILLER_TEXT_MAX_TOKENS}
+        # An old trace omits the default model. Its run profile supplies that
+        # missing identity; a trace without either identity is not reusable.
+        profile_model = None
+        if isinstance(pfile, Path):
+            profile = pfile.with_name("experiment_profile.json")
+            if profile.exists():
+                try:
+                    profile_model = json.loads(profile.read_text(encoding="utf-8")).get("model")
+                except (OSError, ValueError, AttributeError):
+                    pass  # No verified model identity means no legacy-trace reuse.
+            if pfile.exists():
+                for line in pfile.read_text(encoding="utf-8").splitlines():
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue  # A torn final trace grants no successful output.
+                    if not isinstance(row, dict):
+                        continue
+                    params = row.get("params", {})
+                    if not isinstance(params, dict):
+                        continue
+                    model = params.get("model", profile_model)
+                    if (row.get("step") != "render.filler" or model != config.MODEL
+                            or {k: v for k, v in params.items() if k != "model"} != self.params
+                            or not isinstance(row.get("messages"), list)):
+                        continue
+                    self._traces.setdefault(fingerprint(row["messages"]), []).append(row)
+
+    def __call__(self, tracer, messages, blocked):
+        from copy import deepcopy
+        import inspect
+        from pipeline.run import _atomic_write_json
+        from pipeline.grounding_review import _global_execution_failure
+        from llm_trace import failure_record
+        binding = {"version": "filler-body/v1", "messages": messages, "params": self.params,
+                   "model": config.MODEL, "reasoning_effort": config.REASONING_EFFORT,
+                   "min_completion_tokens": config.MIN_COMPLETION_TOKENS,
+                   "blocked": sorted(str(term) for term in blocked if term),
+                   "validator": inspect.getsource(_accept_filler_text),
+                   "credential_pattern": _CREDENTIAL_TOKEN_RE.pattern}
+        key = self._fingerprint(binding)
+        with self._lock:
+            unit_lock = self._locks.setdefault(key, threading.Lock())
+        with unit_lock:
+            path = self.directory / (key + ".json") if self.directory else None
+            if key not in self._states:
+                if path and path.exists():
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                    if record.get("key") != key or record.get("hash") != self._fingerprint(record.get("state")):
+                        raise ValueError("Filler body checkpoint changed")
+                    self._states[key] = record["state"]
+                else:
+                    self._states[key] = {"attempts": []}
+            state = self._states[key]
+
+            def save():
+                if path:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    _atomic_write_json(path, {"key": key, "binding": binding,
+                                              "state": state, "hash": self._fingerprint(state)})
+
+            def accept(raw):
+                try:
+                    return _accept_filler_text(raw, blocked)
+                except RuntimeError:
+                    return []  # Content rejection gets no transport retry.
+
+            if "output" in state:
+                return deepcopy(accept(state["output"]))
+            for attempt in state["attempts"]:
+                from pipeline.filler_failure import is_content_rejection
+                if attempt.get("status") == "returned" and is_content_rejection(attempt.get("output")):
+                    state.update(status="provider_content_rejected", source="checkpoint")
+                    save()
+                    raise FillerContentRejected(attempt["output"])
+                if attempt.get("status") == "returned" and isinstance(attempt.get("output"), str):
+                    raw = attempt["output"]
+                    docs = accept(raw)
+                    state.update(output=raw, status="accepted" if docs else "rejected", source="checkpoint")
+                    save()
+                    return deepcopy(docs)
+            if not state["attempts"]:
+                for row in self._traces.get(self._fingerprint(messages), []):
+                    raw = row.get("output")
+                    if "no provider dispatch" in str(raw):
+                        continue
+                    state["attempts"].append({"status": "returned", "output": raw,
+                                              "source_trace_index": row.get("i")})
+                    if row.get("ok") is True and isinstance(raw, str) and accept(raw):
+                        state.update(output=raw, status="accepted", source="exact_prompt_trace")
+                        save()
+                        return deepcopy(accept(raw))
+                if state["attempts"]:
+                    save()
+            while len(state["attempts"]) < 3:
+                attempt = {"status": "admitted"}
+                state["attempts"].append(attempt)
+                save()  # A process exit during dispatch still consumes this slot.
+                try:
+                    raw = tracer.chat_text("render.filler", messages, **self.params)
+                except Exception as error:
+                    raw = getattr(error, "raw", None) or failure_record(error)
+                    attempt.update(status="returned", output=raw)
+                    save()
+                    if getattr(error, "global_stop", False) or _global_execution_failure(error):
+                        raise
+                else:
+                    attempt.update(status="returned", output=raw)
+                    save()  # Success survives any later sibling/merge failure.
+                if isinstance(raw, dict) and "__error__" in raw:
+                    from pipeline.filler_failure import is_content_rejection
+                    if is_content_rejection(raw):
+                        state.update(status="provider_content_rejected", source="live")
+                        save()
+                        raise FillerContentRejected(raw)
+                    error = FillerExecutionError(raw)
+                    if _global_execution_failure(error):
+                        raise MaterialAuthoringStopped(raw) from error
+                    meta = raw.get("__error_metadata__") or {}
+                    if (meta.get("retryable") is True and meta.get("kind") in {
+                            "http_connect_error", "http_protocol_error", "http_read_error",
+                            "http_write_error", "http_connect_timeout", "http_pool_timeout"}):
+                        continue
+                    raise error
+                docs = accept(raw)
+                state.update(output=raw, status="accepted" if docs else "rejected", source="live")
+                save()
+                return deepcopy(docs)
+            raise FillerExecutionError({"__error__": "Filler transport allowance exhausted (3 total attempts)",
+                                       "last_attempt": state["attempts"][-1]})
 
 
 def _canonical_fact_refs(content: str, facts: list[dict], events: list[dict]) -> list[str]:
@@ -646,53 +1116,35 @@ def _attach_story_provenance(docs, events, scenes, *, ws=None, session=None) -> 
             event_to_scene[ref] for ref in refs if ref in event_to_scene))
 
 
-class _CorpusReviewCallGuard:
-    """Stop new corpus calls after a review execution failure in this render.
-
-    Calls admitted before the failure may finish and retain their original trace.
-    The lock only protects admission/failure state; provider calls stay parallel.
-    """
-
-    def __init__(self, tracer):
-        self._tracer = tracer
-        self.pfile = getattr(tracer, "pfile", None)
-        self._lock = threading.Lock()
-        self._failure = None
-
-    def check(self):
-        with self._lock:
-            if self._failure is not None:
-                raise self._failure
-
-    def fail(self, error):
-        with self._lock:
-            if self._failure is None:
-                self._failure = error
-            failure = self._failure
-        raise failure
-
-    def chat_json(self, *args, **kwargs):
-        self.check()
-        return self._tracer.chat_json(*args, **kwargs)
-
-    def chat_text(self, *args, **kwargs):
-        self.check()
-        return self._tracer.chat_text(*args, **kwargs)
+class _CorpusReviewCallGuard(CallGate):
+    def __init__(self, tracer, *, stop_global=False):
+        super().__init__(tracer, stop_global=stop_global,
+                         failure_factory=MaterialAuthoringStopped)
 
 
 def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, log=print,
-                  only_entities=None, only_entity_sessions=None, haystack_ratio=None):
+                  only_entities=None, only_entity_sessions=None, haystack_ratio=None, orders=None,
+                  corpus_token_target=None, corpus_tokenizer="cl100k_base",
+                  token_state=None, token_save_cb=None, evidence_transport=wire.INLINE):
     """only_entities=None:全量渲(每周全实体+filler)。
     only_entities=set:★增量 delta(§10.1)——【只渲这些新实体的 signal】并【追加】到已有周 docs,
     ``only_entity_sessions`` 精确补渲被新关系/事件改变的旧实体周；haystack_ratio
     显式设置时，所有正文验收后只追加尚缺的 filler。"""
+    wire.template_contract(evidence_transport)
     if target_tokens < 0:
         raise ValueError("语料规模不能为负数")
     corpus_scale(corpus, target_tokens, haystack_ratio)
+    token_counter = None
+    if corpus_token_target is not None:
+        if type(corpus_token_target) is not int or corpus_token_target < 0:
+            raise ValueError("corpus_token_target must be a nonnegative integer")
+        from pipeline.corpus_tokens import CorpusTokenCounter
+        token_counter = CorpusTokenCounter(corpus_tokenizer)
+        token_state = {} if token_state is None else token_state
     story_ledger = getattr(ws, "narrative", None) or {}
     quality_enabled = bool((wp.get("quality_contract") or {}).get("corpus_review"))
     from pipeline.corpus_contract import (canonical_context, review_documents, attach_receipts,
-                                          authoritative_source_assertions, SOURCE_ASSERTION_INSTRUCTIONS,
+                                          authoritative_source_assertions,
                                           public_source_coverage_issues, CorpusReviewExecutionError,
                                           fidelity_requirements, fidelity_coverage_issues)
     projected = bool(getattr(ws, "disclosure", None))
@@ -709,7 +1161,10 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
     # Keep the existing guard inside that period so already-admitted sibling
     # calls can finish without dispatching follow-ups, but do not let one bad
     # period cancel every other period in the same corpus pass.
-    base_tracer = tracer
+    generation_first = bool((wp.get("generation_contract") or {}).get("material_first"))
+    base_tracer = _CorpusReviewCallGuard(tracer, stop_global=True) if generation_first else tracer
+    tracer = base_tracer  # Also covers public-stage material and final haystack top-up.
+    filler_writer = _FillerWriter(base_tracer)
     story_scenes = replay_story_ledger(ws, story_ledger) if story_ledger else []
     profile = wp.get("domain_profile", {})
     blueprint = getattr(ws, "world_blueprint", None) or wp.get("world_blueprint") or {}
@@ -729,7 +1184,8 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
     blocked = _tracked_blocklist(ws, profile)
     # 估算 filler/周 以达目标 token(~1字≈1token)。周并行后不再 early-stop;filler_per_week 已按目标分摊。
     n_sessions = ws.n_sessions
-    filler_per_week = _filler_documents_per_session(wp, target_tokens, n_sessions)
+    filler_per_week = (int(corpus_token_target > 0) if token_counter is not None
+                       else _filler_documents_per_session(wp, target_tokens, n_sessions))
     by_id = {x["session_id"]: x for x in corpus["sessions"]}
     delta_mode = only_entities is not None or only_entity_sessions is not None
     only_entities = set(only_entities or [])
@@ -785,9 +1241,8 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
             sig_groups = [(group, None) for group in _chunk(list(bysku.items()), 2)]
         n_batches = filler_per_week
 
-        def _render_sig(group):                           # ★信号块:渲全 + 渲对
+        def signal_task(group):
             grp, planned_events = group
-            from pipeline.grounding import STOP_MARKERS    # ★只借停用标记(STOP_MARKERS);忠实检不再用 §G 的 attributed(死钉②不同尺)
             gf = [f for _e, fs in grp for f in fs]
             group_entities = {name for name, _facts in grp}
             group_context = {**review_context, "source_assertions": (
@@ -811,6 +1266,14 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
                 story_ledger, story_scenes, s, [e.get("id") for e in group_events], event_by_id))
             requirements = (fidelity_requirements(ws, s, facts=gf, events=group_events)
                             if quality_enabled else [])
+            return {"facts": gf, "events": group_events, "context": group_context,
+                    "story_context": story_context, "requirements": requirements}
+
+        def _render_sig(task, progress=None, save_progress=lambda: None, material_needs=()):
+            from pipeline.grounding import STOP_MARKERS
+            progress = progress if progress is not None else {}
+            gf, group_events, group_context = task["facts"], task["events"], task["context"]
+            story_context, requirements = task["story_context"], task["requirements"]
             # 待渲事实:非停用 → 派盲判别器读 (实体,字段) 的值,代码量纲严格对账;停用 → 验 (实体,停用标记) 同篇
             want_val = [(f["entity"], f["field"], str(f["value"])) for f in gf if f.get("value") and not f.get("stopped")]
             want_stop = [(f["entity"], f["field"]) for f in gf if f.get("stopped")]
@@ -855,27 +1318,72 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
                     masked = masked.replace(nm, "■" * len(nm))
                 return [b for b in LEAK_BANNED if b in masked]
 
+            try:
+                plan = (_plan_signal(tracer, progress, save_progress, facts=gf, events=group_events,
+                        context=group_context, session=s, date=date,
+                        material_needs=material_needs) if generation_first else None)
+            except MaterialAuthoringStopped as error:
+                base_tracer.fail(error)
+            plan_text = ("\n【作者的辅助文档编排；按原事实写作，不能改变事实或时点】\n"
+                         + json.dumps(plan, ensure_ascii=False)
+                         + "\nsources 中 fact:N、event:N、source:N 分别对应本组 facts、events、source_assertions 的零起始索引。"
+                         if plan else "")
+            drafts = progress.setdefault("drafts", [])
             grp_docs, hint, left = [], "", []
             for _att in range(4):                         # 多给几次重渲机会,强制渲全(世界辛苦生成,必须全用上)
-                out = tracer.chat_json("render.signal",
-                    [{"role": "system", "content": sys_sig},
-                     {"role": "user", "content": render(
-                         "corpus.quality_user" if quality_enabled else "corpus.user",
-                         s=week_label(s), time_unit=time_unit, date=date,
-                         facts=json.dumps(gf, ensure_ascii=False),
-                         events=json.dumps(group_events, ensure_ascii=False),
-                         story_context=story_context, hint=hint)
-                         + (("\n【生成与审阅共享的截至时点事实；不得把未知业务状态写成已发生】\n"
-                             + json.dumps(group_context, ensure_ascii=False)
-                             + ("\n" + SOURCE_ASSERTION_INSTRUCTIONS
-                                if group_context["source_assertions"] else "")) if quality_enabled else "")}],
-                    temperature=0.6 if _att == 0 else 0.2, max_tokens=SIGNAL_MAX_TOKENS,
-                    **({"response_format": {"type": "json_object"}} if quality_enabled else {}))
-                if quality_enabled and (not isinstance(out, dict) or "__error__" in out
-                        or not isinstance(out.get("docs"), list) or not out["docs"]
-                        or any(not isinstance(doc, dict) or not isinstance(doc.get("content"), str)
-                               or not doc["content"].strip() for doc in out["docs"])):
-                    review_guard.fail(RuntimeError("render.signal failed or returned invalid document shape"))
+                previous = drafts[_att] if generation_first and _att < len(drafts) else None
+                attempt = previous if previous is not None else {"hint": hint}
+                def phase_tracer(phase):
+                    if not generation_first:
+                        return tracer
+                    journal = attempt.setdefault("subcalls", {}).setdefault(phase, {})
+                    return JournaledTracer(tracer, journal, save_progress)
+                if previous is not None:
+                    hint = previous["hint"]
+                messages, author_binding, parameters = _signal_request(sys_sig,
+                    quality=quality_enabled, session_label=week_label(s), time_unit=time_unit, date=date,
+                    facts=gf, events=group_events, story_context=story_context, hint=hint,
+                    plan_text=plan_text, context=group_context, attempt=_att, evidence_transport=evidence_transport)
+                if evidence_transport != wire.INLINE:
+                    if previous is None:
+                        attempt["author_transport_binding"] = author_binding
+                if previous is not None and previous.get("admitted") and "author_output" not in previous:
+                    # The interrupted dispatch may have been billed. Consume its
+                    # original draft slot and never replay the same dispatch.
+                    continue
+                if "author_output" in attempt:
+                    out = attempt["author_output"]
+                else:
+                    if generation_first:
+                        drafts.append(attempt)
+                        attempt["admitted"] = True
+                        attempt["author_request"] = {"messages": messages, "parameters": parameters}
+                        save_progress()
+                    out = tracer.chat_json("render.signal", messages, **parameters)
+                    if generation_first:
+                        attempt["author_output"] = out
+                        save_progress()
+                if quality_enabled:
+                    if isinstance(out, dict) and "__error__" in out:
+                        from execution_control import global_stop_exception
+                        stopped = global_stop_exception(out)
+                        review_guard.fail(stopped if stopped is not None else
+                            RuntimeError("render.signal author execution failed: " + str(out["__error__"])))
+                    shape_issues = _signal_document_shape_issues(out)
+                    if shape_issues:
+                        # A malformed model body consumes this original draft
+                        # slot. Only the author can produce the missing prose;
+                        # no reader call or invented document is appropriate.
+                        attempt["format_feedback"] = {"issues": shape_issues,
+                            "scope": "document_output_shape_only", "draft": _att + 1}
+                        if generation_first:
+                            save_progress()
+                        grp_docs = []
+                        left = ["正文输出结构错误: " + issue for issue in shape_issues]
+                        hint = ("\n★ 上一稿文档结构不完整，请返回完整非空 docs 数组，每项为含非空字符串 content 的对象。"
+                            "只修输出结构并据原 facts/events/context 写正文，不增加事实或改变时点。\n"
+                            + json.dumps({"previous_response": out, "protocol_feedback": shape_issues}, ensure_ascii=False))
+                        continue
                 cand, leak_notes = [], []
                 for d in _dicts(out.get("docs") if isinstance(out, dict) else []):
                     if not d.get("content"):
@@ -899,7 +1407,12 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
                                     if key in fact}}
                                for index, fact in enumerate(gf)]
                     try:
-                        answers = _discriminate_many(contents, queries, tracer, semantic=True)
+                        answers = attempt.get("blind_answers")
+                        if answers is None:
+                            answers = _discriminate_many(contents, queries, phase_tracer("blind"), semantic=True)
+                            if generation_first:
+                                attempt["blind_answers"] = answers
+                                save_progress()
                     except Exception as exc:
                         review_guard.fail(exc)
                     blind_reads = [{**query, "answer": answers[query["key"]]} for query in queries]
@@ -925,9 +1438,14 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
                 unsupported = []
                 quality_review = None
                 if not missing and quality_enabled:
-                    quality_review = review_documents(tracer, ws, s, cand, context=group_context,
-                        requirements=requirements, blind_reads=blind_reads,
-                        lexical_diagnostics=lexical_diagnostics)
+                    quality_review = attempt.get("quality_review")
+                    if quality_review is None or quality_review.get("status") == "error":
+                        quality_review = review_documents(phase_tracer("review"), ws, s, cand, context=group_context,
+                            requirements=requirements, blind_reads=blind_reads,
+                            lexical_diagnostics=lexical_diagnostics, evidence_transport=evidence_transport)
+                        if generation_first:
+                            attempt["quality_review"] = quality_review
+                            save_progress()
                     if quality_review["status"] == "error":
                         # The real tracer has already preserved the attempted call/raw
                         # output. Do not feed a timeout or malformed review to the
@@ -977,8 +1495,7 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
                 ents = sorted({m.split("的「")[0] for m in left})
                 log(f"  ⚠fail-loud弃段[{time_unit}{week_label(s)}]:{len(left)} 个 atom 多轮重渲后盲读者仍不可还原,弃段不入库({ents})")
                 if quality_enabled or (story_ledger and group_events):
-                    raise RuntimeError(
-                        f"正文质量审阅未通过:{time_unit}{week_label(s)} 经 4 轮生成与审阅仍有 {len(left)} 个未通过项")
+                    raise MaterialRejected(s, task, drafts, left)
                 return []
             if quality_enabled:
                 attach_receipts(grp_docs, quality_review, s)
@@ -990,16 +1507,12 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
         filler_failures: list[str] = []
 
         def _render_fil(_ci):                             # 一次只生成一篇纯正文
-            out = tracer.chat_text("render.filler",
-                [{"role": "system", "content": sys_fil},
-                 {"role": "user", "content": render("filler.user", s=week_label(s), time_unit=time_unit,
-                                                      date=date, slot=_ci + 1)}],
-                temperature=0.9, max_tokens=FILLER_TEXT_MAX_TOKENS)
             try:
-                return _accept_filler_text(out, blocked)
-            except RuntimeError as error:
-                # filler 只提供草堆密度，不承载任何 gold。单篇协议失败显式记账并跳过；
-                # 最终仍以总语料字符下限 fail-closed，不重试也不伪造替代正文。
+                return filler_writer(tracer,
+                    [{"role": "system", "content": sys_fil},
+                     {"role": "user", "content": render("filler.user", s=week_label(s), time_unit=time_unit,
+                                                          date=date, slot=_ci + 1)}], blocked)
+            except FillerExecutionError as error:
                 filler_failures.append(str(error))
                 return []
 
@@ -1010,22 +1523,73 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
             from pipeline import corpus_contract
             pfile = getattr(tracer, "pfile", None)
             cache_path = None
+            progress = {}
+            material_needs = _material_needs(orders, {name for name, _facts in group[0]}, s)
+            task = signal_task(group)
             if isinstance(pfile, Path):
-                key = fingerprint({"wp": wp, "world": ws.to_dict(), "session": s, "group": group,
+                key = fingerprint({"version": "signal-task/v2", "task": task,
+                    "system": sys_sig,
+                    "planning": {"system": MATERIAL_PLAN_SYSTEM, "material_needs": material_needs},
+                    "material_first": generation_first, "corpus_review": quality_enabled,
+                    "story_ledger": bool(story_ledger), "session": s, "date": date})
+                from pipeline import signal_inheritance, task_execution
+                import execution_control
+                acceptance_binding = fingerprint({"task": key, "world": ws.to_dict(),
                     "model": config.MODEL, "reviewer": config.REVIEWER_MODEL,
                     "discriminator": config.DISCRIMINATOR_MODEL,
+                    "transport": wire.template_contract(evidence_transport),
                     "render": Path(__file__).read_text(encoding="utf-8"),
-                    "review": Path(corpus_contract.__file__).read_text(encoding="utf-8")})
+                    "review": Path(corpus_contract.__file__).read_text(encoding="utf-8"),
+                    "journal": Path(task_execution.__file__).read_text(encoding="utf-8"),
+                    "inheritance": Path(signal_inheritance.__file__).read_text(encoding="utf-8"),
+                    "execution": Path(execution_control.__file__).read_text(encoding="utf-8")})
                 cache_path = pfile.parent / "05_signal_checkpoints" / (key + ".json")
                 if cache_path.exists():
                     cached = json.loads(cache_path.read_text(encoding="utf-8"))
-                    if cached.get("key") != key or cached.get("hash") != fingerprint(cached.get("documents")):
+                    if cached.get("key") != key:
                         raise ValueError("Corpus signal checkpoint changed")
-                    return cached["documents"]
-            documents = _render_sig(group)
+                    if "progress" in cached:
+                        if cached.get("progress_hash") != fingerprint(cached["progress"]):
+                            raise ValueError("Corpus signal progress checkpoint changed")
+                        progress = cached["progress"]
+                        for draft in progress.get("drafts", []):
+                            if "author_transport_binding" in draft:
+                                wire.verify_template_receipt(draft["author_request"], draft["author_transport_binding"])
+                    if "documents" in cached and cached.get("acceptance_binding") == acceptance_binding:
+                        if cached.get("hash") != fingerprint(cached["documents"]):
+                            raise ValueError("Corpus signal checkpoint changed")
+                        return cached["documents"]
+                    if cached.get("acceptance_binding") != acceptance_binding:
+                        if progress.get("legacy_inheritance"):
+                            raise ValueError("Inherited review binding changed; explicit migration is required")
+                        # Revalidate saved raw replies under the current implementation.
+                        # The task and four author slots remain the same.
+                        for draft in progress.get("drafts", []):
+                            draft.pop("quality_review", None)
+                            draft.pop("blind_answers", None)
+                else:
+                    from pipeline.signal_inheritance import inherit_progress
+                    inherited = inherit_progress(pfile.parent, key=key, group=group,
+                        task=task, material_needs=material_needs, system=sys_sig,
+                        quality=quality_enabled, session_label=week_label(s),
+                        time_unit=time_unit, date=date, model=config.MODEL,
+                        reviewer_model=config.REVIEWER_MODEL,
+                        discriminator_model=config.DISCRIMINATOR_MODEL,
+                        transport=evidence_transport)
+                    if inherited is not None:
+                        progress = inherited
+            def save_progress():
+                if cache_path:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    _atomic_write_json(cache_path, {"key": key, "acceptance_binding": acceptance_binding,
+                                                   "progress": progress,
+                                                   "progress_hash": fingerprint(progress)})
+            documents = _render_sig(task, progress, save_progress, material_needs)
             if cache_path:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
-                _atomic_write_json(cache_path, {"key": key, "documents": documents, "hash": fingerprint(documents)})
+                _atomic_write_json(cache_path, {"key": key, "acceptance_binding": acceptance_binding,
+                    "documents": documents, "hash": fingerprint(documents),
+                    "progress": progress, "progress_hash": fingerprint(progress)})
             return documents
 
         sig_lists = config.pmap(render_signal_with_checkpoint, sig_groups, workers=4)
@@ -1074,17 +1638,32 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
     def _render_week_isolated(s):
         try:
             return _render_week(s)
-        except CorpusReviewExecutionError as exc:
+        except (CorpusReviewExecutionError, MaterialRejected) as exc:
             # The exact failed review is already present in the tracer.  Keep
             # the period absent from done_weeks, allow the remaining periods to
             # finish and checkpoint, then fail the stage once with the original
             # typed error so the normal partial-corpus recovery path is used.
             with period_failure_lock:
                 period_failures.append((s, exc))
-            log(f"  ⚠{time_unit}{week_label(s)}语料审阅执行失败；本期保持待补，其他期继续")
+            log(f"  ⚠{time_unit}{week_label(s)}语料未通过；保留原意见，本期保持待补，其他期继续")
             return None
 
-    config.pmap(_render_week_isolated, weeks, workers=max(1, min(4, len(weeks))))  # Bound queued week/group memory too.
+    try:
+        config.pmap(_render_week_isolated, weeks, workers=max(1, min(4, len(weeks))))
+    except Exception as error:
+        # The executor drains admitted siblings before raising its first failed
+        # future. A later provider-wide stop must still reach the stage; the
+        # first period failure remains in its exception context and checkpoint.
+        if generation_first:
+            try:
+                base_tracer.check()
+            except Exception as stop:
+                error = stop
+        if period_failures:
+            raise error from period_failures[0][1]
+        raise error
+    if generation_first:
+        base_tracer.check()
     if period_failures:
         period_failures.sort(key=lambda item: item[0])
         raise period_failures[0][1]
@@ -1128,24 +1707,33 @@ def render_corpus(wp, ws, target_tokens, tracer, corpus, done_weeks, save_cb, lo
             f"弃无引用信号 {sanitized['dropped_unref']} 篇 / "
             f"清理扩容后撞词 filler {sanitized['dropped_filler_leaks']} 篇 / "
             f"清理凭据形态 filler {sanitized['dropped_filler_credentials']} 篇")
-    if haystack_ratio is not None:
+    if token_counter is not None:
+        _top_up_haystack_tokens(corpus, corpus_token_target, haystack_ratio, base_tracer,
+                               sys_fil, blocked, time_unit, save_cb, token_state,
+                               token_save_cb, token_counter, log, filler_writer=filler_writer)
+    elif haystack_ratio is not None:
         _top_up_haystack(corpus, target_tokens, haystack_ratio, base_tracer,
-                        sys_fil, blocked, time_unit, save_cb, log)
+                        sys_fil, blocked, time_unit, save_cb, log, filler_writer=filler_writer)
     ch = sum(len(dd.get("content", "")) for x in corpus["sessions"] for dd in x["docs"])
-    if ch < target_tokens and haystack_ratio is None:
+    if token_counter is None and ch < target_tokens and haystack_ratio is None:
         save_cb()
         raise RuntimeError(
             f"语料字符不足:{ch}/{target_tokens}；filler 可单篇缺失，但总规模合同不允许欠账")
     fb = f";⚠fail-loud弃段 {len(fallback_count)} 处/{sum(fallback_count)} 个 atom 未忠实渲染(验收要求趋零)" if fallback_count else ";弃段 0(✓)"
-    log(f"  ✓ 渲染完成:{sum(len(x['docs']) for x in corpus['sessions'])} 篇 / {ch/1e6:.2f}M 字(目标 {target_tokens/1e6:.1f}M){fb}")
+    if token_counter is not None:
+        log(f"  ✓ 渲染完成:{sum(len(x['docs']) for x in corpus['sessions'])} 篇 / "
+            f"{token_state['total_tokens']} token / {ch} 字符(目标 {corpus_token_target} token){fb}")
+    else:
+        log(f"  ✓ 渲染完成:{sum(len(x['docs']) for x in corpus['sessions'])} 篇 / {ch/1e6:.2f}M 字(目标 {target_tokens/1e6:.1f}M){fb}")
 
 
 PHRASE_SYS = render("phrase.system")
 
 
-def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_path=None) -> list[dict]:
+def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_path=None,
+                     corpus=None, public_protocol=None) -> list[dict]:
     from copy import deepcopy
-    from pipeline.question_contract import attach_question_contract, validate_question
+    from pipeline.question_contract import attach_question_contract, validate_question, render_intent
 
     if audit is not None and not isinstance(audit, dict):
         raise TypeError("Question wording audit must be a dictionary")
@@ -1156,10 +1744,17 @@ def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_pa
     from pipeline.semantic_review import fingerprint
     from pipeline import question_wording
     from pipeline.run import _atomic_write_json
+    material_mode = corpus is not None
+    documents, material_binding = [], None
+    if material_mode:
+        from pipeline.semantic_review import visible_documents
+        documents, _ = visible_documents(corpus)
+        material_binding = question_wording.authoring_binding(corpus, public_protocol)
     persistent = checkpoint_path is not None
     checkpoint = Path(checkpoint_path) if persistent else None
     saved_items, progress_lock = {}, threading.Lock()
     execution_binding = fingerprint({"whitepaper": wp, "author": config.MODEL,
+        "material_mode": material_mode, "protocol": public_protocol,
         "reviewer": config.REVIEWER_MODEL, "render": Path(__file__).read_text(encoding="utf-8"),
         "wording": Path(question_wording.__file__).read_text(encoding="utf-8")})
     if checkpoint and checkpoint.exists():
@@ -1184,19 +1779,35 @@ def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_pa
                           "status": "not_started", "calls_admitted": 0, "attempts": [],
                           "candidate": None, "selected": False, "failure": None}
                          for index, order in enumerate(orders)])
+    if material_mode:
+        report["source_binding"] = deepcopy(material_binding)
     # Per-run admission state. Do not serialize provider calls; already-admitted
     # calls can finish and keep their normal tracer records after a peer fails.
     failure_lock, failures = threading.Lock(), []
     semantic_mode = bool((wp.get("quality_contract") or {}).get("scoring_policy"))
 
     def _phrase_one(o, row):                              # 每条订单独立 → 并发出题
+        original_order = o
         def call_json(*args, **kwargs):
             if persistent:
                 kwargs["retries"] = 3
+            cache = row.setdefault("call_cache", {}) if persistent and material_mode else None
+            key = fingerprint({"args": args, "kwargs": kwargs}) if cache is not None else None
+            if cache is not None and key in cache:
+                if "output" not in cache[key]:
+                    raise question_wording.QuestionAuthoringFormatError(
+                        "Interrupted author dispatch has no persisted result; original order retained")
+                output = deepcopy(cache[key]["output"])
+                if isinstance(output, dict) and "__error__" in output:
+                    raise question_wording.QuestionAuthoringExecutionError(output)
+                return output
             with failure_lock:
-                if semantic_mode and failures and not persistent:
+                if semantic_mode and failures and (not persistent or material_mode):
                     raise RuntimeError("Previous question wording execution failed; no new calls")
                 row["calls_admitted"] += 1
+            if cache is not None:
+                cache[key] = {"state": "admitted"}
+                remember(original_order, row, None)
             try:
                 output = tracer.chat_json(*args, **kwargs)
             except Exception as exc:
@@ -1204,6 +1815,11 @@ def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_pa
                     if semantic_mode and not failures and not persistent:
                         failures.append(exc)
                 raise
+            if cache is not None:
+                cache[key] = {"state": "completed", "output": deepcopy(output)}
+                remember(original_order, row, None)
+            if material_mode and isinstance(output, dict) and "__error__" in output:
+                raise question_wording.QuestionAuthoringExecutionError(output)
             if semantic_mode and isinstance(output, dict) and "__error__" in output:
                 with failure_lock:
                     if not failures and not persistent:
@@ -1215,40 +1831,48 @@ def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_pa
         line = line_for(o.get("line", ""))                # 出题意图/须隐藏 = 各产线自己的 intent()
         if line is None:                                  # 兜底(订单都来自已建线,理论不触发)
             return {**o, "question": "", "_phrase_fallback": False}
-        intent, hide = line.intent(o)
+        intent, hide = render_intent(o, o["question_contract"])
+        compiled_display = bool(getattr(line, "deterministic_phrasing", False)
+            or (o["question_contract"].get("version", 0) >= 2 and o.get("capability") == "L3_order"))
+        state = question_wording.material_state(o, documents, material_binding) if material_mode else None
         if o["question_contract"]["render_policy"] == "semantic_review":
             from pipeline.question_wording import AUTHOR_SYSTEM, review_wording
-            if getattr(line, "deterministic_phrasing", False):
+            if compiled_display:
                 text = intent
             else:
-                authored = call_json("phrase", [{"role": "system", "content": AUTHOR_SYSTEM},
+                authored = (question_wording.author_with_materials(intent, hide, o["question_contract"],
+                    public_protocol, state, chat_json=call_json, audit=row) if material_mode else
+                    call_json("phrase", [{"role": "system", "content": AUTHOR_SYSTEM},
                     {"role": "user", "content": render("phrase.user", intent=intent, hide=hide)}],
-                    temperature=0.5, max_tokens=2048, retries=1, strict_json=True)
+                    temperature=0.5, max_tokens=2048, retries=1, strict_json=True))
                 row["author_output"] = deepcopy(authored)
                 if (not isinstance(authored, dict) or "__error__" in authored
                         or not isinstance(authored.get("question"), str) or not authored["question"].strip()):
-                    raise RuntimeError("Question author failed; no semantic fallback on execution failure")
+                    raise question_wording.QuestionAuthoringFormatError("Question author failed; no semantic fallback on execution failure")
                 text = authored["question"]
             row["candidate"] = {**deepcopy(o), "question": text}
-            row["attempts"].append({"source": "canonical" if getattr(line, "deterministic_phrasing", False)
+            row["attempts"].append({"source": "canonical" if compiled_display
                                     else "author", "question": text, "review": None})
             first = review_wording(text, o["question_contract"], chat_json=call_json,
                                    model=config.REVIEWER_MODEL)
             row["attempts"][-1]["review"] = deepcopy(first)
             reviews = [first]
-            if first["status"] != "passed" and not getattr(line, "deterministic_phrasing", False):
+            if first["status"] != "passed" and not compiled_display:
                 # Return semantic feedback to the same author once. Execution
                 # failures propagate without inventing a repaired candidate.
                 repair_request = {"original_intent": intent, "hidden_values": hide,
                                   "candidate_question": text, "review_feedback": first["opinion"]}
                 row["repair_request"] = deepcopy(repair_request)
-                repaired = call_json("phrase", [{"role": "system", "content": AUTHOR_SYSTEM},
+                repaired = (question_wording.author_with_materials(intent, hide, o["question_contract"],
+                    public_protocol, state, chat_json=call_json, audit=row,
+                    candidate=text, review_feedback=first["opinion"]) if material_mode else
+                    call_json("phrase", [{"role": "system", "content": AUTHOR_SYSTEM},
                     {"role": "user", "content": json.dumps(repair_request, ensure_ascii=False)}],
-                    temperature=0.5, max_tokens=2048, retries=1, strict_json=True)
+                    temperature=0.5, max_tokens=2048, retries=1, strict_json=True))
                 row["repair_author_output"] = deepcopy(repaired)
                 if (not isinstance(repaired, dict) or "__error__" in repaired
                         or not isinstance(repaired.get("question"), str) or not repaired["question"].strip()):
-                    raise RuntimeError("Question repair author failed; no semantic fallback on execution failure")
+                    raise question_wording.QuestionAuthoringFormatError("Question repair author failed; no semantic fallback on execution failure")
                 text = repaired["question"]
                 row["candidate"] = {**deepcopy(o), "question": text}
                 row["attempts"].append({"source": "author_repair", "question": text, "review": None})
@@ -1273,10 +1897,11 @@ def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_pa
                     "question_validation": {"status": "passed", "mode": "canonical_template",
                         "source": "deterministic_template", "llm_calls": 0,
                         "issues": [], "rewrite_issues": []}}
-        out = call_json("phrase",
+        out = (question_wording.author_with_materials(intent, hide, o["question_contract"],
+            public_protocol, state, chat_json=call_json, audit=row) if material_mode else call_json("phrase",
             [{"role": "system", "content": PHRASE_SYS},
              {"role": "user", "content": render("phrase.user", intent=intent, hide=hide)}],
-            temperature=0.5, max_tokens=2048)
+            temperature=0.5, max_tokens=2048))
         q = out.get("question", "") if isinstance(out, dict) else ""
         q = q if isinstance(q, str) else ""
         issues = validate_question(q, o["question_contract"])
@@ -1300,11 +1925,16 @@ def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_pa
         previous = deepcopy(saved_items.get(fingerprint(order))) if persistent else None
         if previous and previous.get("result") is not None:
             result = previous["result"]
-            if (not result.get("question") or not semantic_mode or not question_wording.validate_wording(result)):
+            words_current = not result.get("question") or not semantic_mode or not question_wording.validate_wording(result)
+            author_current = (not material_mode or not result.get("question") or not question_wording.validate_authoring(
+                result, corpus, public_protocol, expected_binding=material_binding))
+            if words_current and author_current:
                 row.update(previous["row"], input_index=index, resumed=True, calls_admitted=0)
                 return deepcopy(result)
         if previous and previous["row"].get("failure"):
             row["previous_execution_failure"] = previous["row"]["failure"]
+        if previous and material_mode:
+            row["call_cache"] = deepcopy(previous["row"].get("call_cache", {}))
         try:
             result = _phrase_one(order, row)
         except Exception as exc:
@@ -1321,6 +1951,11 @@ def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_pa
                     row["attempts"][-1]["review"] = deepcopy(exc.report)
             remember(order, row, None)
             if persistent:
+                if material_mode and not question_wording.local_authoring_failure(exc):
+                    with failure_lock:
+                        if not failures:
+                            failures.append(exc)
+                    raise
                 return {**order, "question": "", "_phrase_fallback": False}
             raise
         row["selected"] = bool(result.get("question", "").strip())
@@ -1329,6 +1964,16 @@ def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_pa
         # Keep the last actual candidate text even when the returned selection
         # intentionally has an empty question to exclude unresolved wording.
         actual_text = (row["candidate"] or {}).get("question", result.get("question", ""))
+        if material_mode:
+            # History belongs to the material actually supplied to this author.
+            # Reusing candidate text later must never rebind this old history.
+            authoring = deepcopy(row.get("authoring") or {**material_binding,
+                "status": "canonical_template", "semantic_sufficiency_verified": False,
+                "read_spans": [], "reason": "Original deterministic wording retained."})
+            authoring.update(question_hash=fingerprint(actual_text),
+                contract_hash=fingerprint(result.get("question_contract")),
+                reference_hash=fingerprint(result.get("gt")))
+            result.setdefault("question_validation", {})["authoring"] = authoring
         row["candidate"] = {**deepcopy(result), "question": actual_text}
         row["candidate"].pop("_phrase_fallback", None)
         remember(order, row, result)
@@ -1344,6 +1989,11 @@ def phrase_questions(orders, wp, tracer, log=print, *, audit=None, checkpoint_pa
         report["execution_status"] = "failed"
         report["execution_failure"] = {"type": type(exc).__name__, "message": str(exc)}
         update_counts()
+        if material_mode and not question_wording.local_authoring_failure(exc):
+            raise question_wording.QuestionAuthoringStopped(str(exc),
+                completed_questions=[row["candidate"] for row in report["items"]
+                                     if row.get("selected") and row.get("candidate")],
+                report=report) from exc
         raise
     fallback_count = sum(bool(q.pop("_phrase_fallback", False)) for q in raw)
     qs = [q for q in raw if q.get("question", "").strip()]    # 丢并发下偶发的空题面

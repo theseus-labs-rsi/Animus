@@ -14,13 +14,34 @@ VERSION = "direct-disclosure/v2"
 FACT_CHARS = 24000
 CONTEXT_CHARS = 48000
 INPUT_CHARS = 120000
+NEW_GROUP_HEADROOM_CHARS = 8000
 SEMANTIC_REPAIR_STEP = "world.disclosure.semantic_repair"
+LEGACY_SEMANTIC_REPAIR_PROTOCOL = "acquisition-repair/v1"
+SEMANTIC_REPAIR_PROTOCOL = "publication-repair/v2"
 
 SEMANTIC_REPAIR_RULES = """你负责局部修正已经完成的公开安排。只处理输入列出的记录。
 每条 replacement 必须保留原 record_index、session、refs 和 channel，只把 acquisition_context
 改成与 exact_facts 完全一致的获取时间、途径和公开范围。不得补写未提供的事实，不得扩大 refs，
 不得修改其他记录。返回 {"record_updates":[{"record_index":0,"record":{完整替换记录}}],
 "reason":"修正依据"}。record_updates 必须逐条覆盖 requested_record_indices，且每个索引恰好一次。"""
+
+PUBLICATION_REPAIR_RULES = """你负责局部修正已经完成的公开安排。只处理输入列出的记录。
+每条 replacement 必须保留原 record_index、refs 和 channel；你可以修订公开期 session 和
+acquisition_context。session 是这条记录实际公开的期，publication_scope.calendar 给出原日历。
+若需要延后公开，应实际修改 session，不能只在获取说明中写后来补录而保留原公开期。
+获取说明与 exact_facts 的确切版本、事实时点及所选公开期须能同时成立。事实/事件原值和时点
+不在本次修改范围，不能通过公开说明把原事实的日期改掉。只在原窗口内安排，不得补写未提供的
+事实、扩大 refs、改变其他记录或要求后续正文替你修正安排。固定通道仍受原编译器约束。
+返回 {"record_updates":[{"record_index":0,"record":{完整替换记录}}],"reason":"修正依据"}。
+record_updates 必须逐条覆盖 requested_record_indices，且每个索引恰好一次。"""
+
+
+def _semantic_repair_rules(protocol):
+    if protocol == LEGACY_SEMANTIC_REPAIR_PROTOCOL:
+        return SEMANTIC_REPAIR_RULES
+    if protocol == SEMANTIC_REPAIR_PROTOCOL:
+        return PUBLICATION_REPAIR_RULES
+    raise ValueError("Unsupported disclosure repair protocol")
 
 
 class InputCapacityError(ValueError):
@@ -66,9 +87,16 @@ def _pack(ids, by_ref, limit):
     return selected
 
 
-def _messages(payload, raw, targets, context, repair):
+def _messages(payload, raw, targets, context, repair, *, index_scope="all"):
+    if index_scope not in {"all", "pending_only"}:
+        raise ValueError("Unsupported disclosure index scope")
     by_ref = {row["ref"]: row for row in payload["catalogue"]}
     visible = set(targets) | set(context)
+    pending = None
+    if index_scope == "pending_only":
+        pending = set(payload["refs_requiring_arrangement"]) - set(raw["undisclosed"])
+        for record in raw["records"]:
+            pending.difference_update(record["refs"])
     common = {k: deepcopy(v) for k, v in payload.items()
               if k not in {"catalogue", "fixed_records", "refs_requiring_arrangement"}}
     common["fixed_records"] = [{k: row[k] for k in ("session", "refs", "channel")} for row in payload["fixed_records"]]
@@ -76,7 +104,8 @@ def _messages(payload, raw, targets, context, repair):
     index = [{"ref": ref, "entity": row.get("entity"), "field": row.get("field"),
               "event": (row.get("event") or {}).get("id"),
               "session": row.get("fact_session", (row.get("event") or {}).get("session"))}
-             for ref, row in by_ref.items() if ref not in visible]
+             for ref, row in by_ref.items() if ref not in visible
+             and (pending is None or ref in pending)]
     body = {"requirements": common, "target_refs": targets,
             "exact_facts": [by_ref[ref] for ref in dict.fromkeys(targets + context)],
             "remaining_index": index, "accepted_records": raw["records"],
@@ -93,17 +122,42 @@ def _messages(payload, raw, targets, context, repair):
             {"role": "user", "content": json.dumps(body, ensure_ascii=False)}]
 
 
-def _fit_messages(payload, raw, targets, context, repair, required=()):
+def _fit_messages(payload, raw, targets, context, repair, required=(), *, index_scope="all"):
     """Trim only optional neighbouring facts; explicit author requests stay exact."""
     required = list(dict.fromkeys(required))
     context = list(dict.fromkeys(required + list(context)))
     while True:
         try:
-            return _messages(payload, raw, targets, context, repair), context
+            return _messages(payload, raw, targets, context, repair, index_scope=index_scope), context
         except InputCapacityError:
             if len(context) <= len(required):
                 raise
             context.pop()
+
+
+def _select_batch(payload, raw, by_ref, pending, preferred):
+    """Size the next fact group against the complete current message.
+
+    Accepted decisions grow after every group, so a fixed fact-only batch
+    size cannot guarantee that later messages fit the transport envelope.
+    """
+    targets = _pack(preferred + pending, by_ref, FACT_CHARS)
+    while True:
+        names = set().union(*(_entities(by_ref[ref]) for ref in targets))
+        related = [ref for ref, row in by_ref.items()
+                   if ref not in targets and _entities(row) & names]
+        context = _pack(related, by_ref, CONTEXT_CHARS)
+        try:
+            messages, context = _fit_messages(payload, raw, targets, context, None,
+                                               index_scope="pending_only")
+        except InputCapacityError:
+            if len(targets) == 1:
+                raise
+        else:
+            if (len(messages[-1]["content"]) <= INPUT_CHARS - NEW_GROUP_HEADROOM_CHARS
+                    or len(targets) == 1):
+                return targets, context
+        targets = targets[:max(1, len(targets) // 2)]
 
 
 def _merge(ws, raw, output, targets, visible):
@@ -156,7 +210,9 @@ def _merge(ws, raw, output, targets, visible):
     return result
 
 
-def _semantic_repair_messages(payload, raw, record_indices, feedback, repair=None):
+def _semantic_repair_messages(payload, raw, record_indices, feedback, repair=None, *,
+                              protocol=LEGACY_SEMANTIC_REPAIR_PROTOCOL):
+    rules = _semantic_repair_rules(protocol)
     by_ref = {row["ref"]: row for row in payload["catalogue"]}
     records = [{"record_index": index, "record": deepcopy(raw["records"][index])}
                for index in record_indices]
@@ -164,13 +220,18 @@ def _semantic_repair_messages(payload, raw, record_indices, feedback, repair=Non
     body = {"requested_record_indices": record_indices, "records": records,
             "exact_facts": [deepcopy(by_ref[ref]) for ref in refs],
             "review_feedback": deepcopy(feedback), **deepcopy(repair or {})}
+    if protocol == SEMANTIC_REPAIR_PROTOCOL:
+        body["publication_scope"] = {"editable_fields": ["session", "acquisition_context"],
+            "fixed_fields": ["refs", "channel"], "calendar": deepcopy(payload["calendar"])}
     if _size(body) > INPUT_CHARS:
         raise InputCapacityError("Semantic disclosure repair input exceeds direct delivery capacity")
-    return [{"role": "system", "content": SEMANTIC_REPAIR_RULES},
+    return [{"role": "system", "content": rules},
             {"role": "user", "content": json.dumps(body, ensure_ascii=False)}]
 
 
-def _merge_semantic_repair(ws, raw, output, record_indices):
+def _merge_semantic_repair(ws, raw, output, record_indices, *,
+                           protocol=LEGACY_SEMANTIC_REPAIR_PROTOCOL):
+    _semantic_repair_rules(protocol)
     if not isinstance(output, dict) or set(output) != {"record_updates", "reason"}:
         raise ValueError("Semantic repair requires exactly record_updates and reason")
     updates = output["record_updates"]
@@ -184,8 +245,10 @@ def _merge_semantic_repair(ws, raw, output, record_indices):
         if index not in record_indices or index in by_index or not isinstance(record, dict):
             raise ValueError("Semantic repair used an unrequested or duplicate record index")
         original = raw["records"][index]
-        if any(record.get(key) != original.get(key) for key in ("session", "refs", "channel")):
-            raise ValueError("Semantic repair must preserve session, refs and channel")
+        fixed_fields = ("session", "refs", "channel") if protocol == LEGACY_SEMANTIC_REPAIR_PROTOCOL else ("refs", "channel")
+        if any(record.get(key) != original.get(key) for key in fixed_fields):
+            detail = "session, refs and channel" if protocol == LEGACY_SEMANTIC_REPAIR_PROTOCOL else "refs and channel"
+            raise ValueError("Semantic repair must preserve " + detail)
         if (set(record) != set(original) or not isinstance(record.get("acquisition_context"), str)
                 or not record["acquisition_context"].strip()):
             raise ValueError("Semantic repair must return the complete record with nonempty acquisition_context")
@@ -210,17 +273,20 @@ def _replay(payload, ws, parts):
             if (not isinstance(indices, list) or not indices or len(set(indices)) != len(indices)
                     or any(type(i) is not int or i < 0 or i >= len(raw["records"]) for i in indices)):
                 raise ValueError("Semantic disclosure repair indices are stale or invalid")
-            messages = _semantic_repair_messages(payload, raw, indices, part.get("feedback"), part.get("repair"))
+            protocol = part.get("protocol", LEGACY_SEMANTIC_REPAIR_PROTOCOL)
+            messages = _semantic_repair_messages(payload, raw, indices, part.get("feedback"), part.get("repair"),
+                                                protocol=protocol)
             if part.get("messages_hash") != d._hash(messages):
                 raise ValueError("Semantic disclosure repair input changed")
-            raw = _merge_semantic_repair(ws, raw, part.get("output"), indices)
+            raw = _merge_semantic_repair(ws, raw, part.get("output"), indices, protocol=protocol)
             continue
         targets, context = part["target_refs"], part["context_refs"]
         pending = set(d._missing_refs(ws, raw))
         if (not targets or len(set(targets)) != len(targets) or not set(targets) <= pending
                 or not set(context) <= all_refs):
             raise ValueError("Disclosure checkpoint targets/context are stale or invalid")
-        messages = _messages(payload, raw, targets, context, part.get("repair"))
+        messages = _messages(payload, raw, targets, context, part.get("repair"),
+                             index_scope=part.get("index_scope", "all"))
         if part["messages_hash"] != d._hash(messages):
             raise ValueError("Disclosure exact input or earlier accepted work changed")
         raw = _merge(ws, raw, part["output"], targets, set(targets) | set(context))
@@ -241,10 +307,12 @@ def _replay_preserved_decisions(payload, ws, parts):
     for part in parts:
         if part.get("kind") == "semantic_repair":
             indices = part.get("record_indices")
-            messages = _semantic_repair_messages(payload, raw, indices, part.get("feedback"), part.get("repair"))
+            protocol = part.get("protocol", LEGACY_SEMANTIC_REPAIR_PROTOCOL)
+            messages = _semantic_repair_messages(payload, raw, indices, part.get("feedback"), part.get("repair"),
+                                                protocol=protocol)
             if part.get("messages_hash") != d._hash(messages):
                 raise ValueError("Preserved semantic disclosure repair input changed")
-            raw = _merge_semantic_repair(ws, raw, part.get("output"), indices)
+            raw = _merge_semantic_repair(ws, raw, part.get("output"), indices, protocol=protocol)
             continue
         targets, context = part["target_refs"], part["context_refs"]
         pending = set(d._missing_refs(ws, raw))
@@ -272,6 +340,42 @@ def _save(path, state):
     temporary.replace(path)
 
 
+def _migrate_checkpoint(directory, current_path, binding, payload, ws):
+    """Copy an exactly replayable earlier envelope into the new implementation.
+
+    The original checkpoint remains untouched.  Business outputs and the
+    historical message hashes are checked before any continuation is allowed.
+    """
+    source_fields = ("truth_hash", "wp_hash", "input_hash", "call_hash", "protocol_hash")
+    matches = []
+    for old_path in sorted(Path(directory).glob("02_disclosure_checkpoint_*.json")):
+        if old_path == current_path:
+            continue
+        source = old_path.read_bytes()
+        saved = json.loads(source)
+        old_binding = saved.get("binding") or {}
+        if any(old_binding.get(key) != binding[key] for key in source_fields):
+            continue
+        if old_binding.get("limits") != binding["limits"]:
+            continue
+        if saved.get("checkpoint_hash") != d._hash(
+                {key: value for key, value in saved.items() if key != "checkpoint_hash"}):
+            raise ValueError("Matching disclosure checkpoint changed; refusing migration")
+        _replay(payload, ws, saved["parts"])
+        matches.append((old_path, source, saved))
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("Multiple matching disclosure checkpoints; choose a source explicitly")
+    old_path, source, saved = matches[0]
+    saved["binding"] = binding
+    saved["migrated_from"] = {"checkpoint": old_path.name,
+                              "sha256": hashlib.sha256(source).hexdigest(),
+                              "accepted_groups": len(saved["parts"])}
+    _save(current_path, saved)
+    return saved
+
+
 def _plan(wp, ws, task, feedback, payload, state, model):
     try:
         raw = _replay(payload, ws, state["parts"])
@@ -291,7 +395,7 @@ def _plan(wp, ws, task, feedback, payload, state, model):
 def repair(wp, ws, tracer, review):
     """Repair only disclosure records explicitly rejected by the bound world review."""
     import config
-    report = {"version": "direct-disclosure-semantic-repair/v1", "status": "not_needed",
+    report = {"version": "direct-disclosure-semantic-repair/v2", "status": "not_needed",
               "logical_calls": 0, "attempts": []}
     try:
         plan = ws.disclosure
@@ -333,7 +437,8 @@ def repair(wp, ws, tracer, review):
                     "disclosure_reviews": deepcopy(rows)}
         repair_context = None
         for number in range(3):
-            messages = _semantic_repair_messages(payload, raw, indices, feedback, repair_context)
+            messages = _semantic_repair_messages(payload, raw, indices, feedback, repair_context,
+                                                protocol=SEMANTIC_REPAIR_PROTOCOL)
             entry = {"number": number + 1, "messages_hash": d._hash(messages), "status": "started"}
             report["attempts"].append(entry)
             report["logical_calls"] += 1
@@ -344,12 +449,12 @@ def repair(wp, ws, tracer, review):
             if isinstance(output, dict) and "__error__" in output:
                 raise RuntimeError("Semantic disclosure repair execution failed: " + str(output["__error__"]))
             try:
-                _merge_semantic_repair(ws, raw, output, indices)
+                _merge_semantic_repair(ws, raw, output, indices, protocol=SEMANTIC_REPAIR_PROTOCOL)
             except (ValueError, KeyError, TypeError, d.PlanFormatError) as exc:
                 entry.update(status="local_repair_required", error=str(exc))
                 repair_context = {"previous_output": deepcopy(output), "validation_error": str(exc)}
                 continue
-            part = {"kind": "semantic_repair", "record_indices": indices,
+            part = {"kind": "semantic_repair", "protocol": SEMANTIC_REPAIR_PROTOCOL, "record_indices": indices,
                     "feedback": feedback, "repair": repair_context,
                     "messages_hash": d._hash(messages), "output": deepcopy(output)}
             rebuilt = _plan(source["whitepaper"], ws, source["task"], source["feedback"], payload,
@@ -409,6 +514,10 @@ def author(wp, ws, tracer, task=None, feedback=None, checkpoint_dir=None):
         if checkpoint_dir is not None:
             path = Path(checkpoint_dir) / ("02_disclosure_checkpoint_" + d._hash(binding)[:20] + ".json")
             report["checkpoint"] = str(path)
+            if not path.exists():
+                migrated = _migrate_checkpoint(checkpoint_dir, path, binding, payload, ws)
+                if migrated is not None:
+                    report["migrated_checkpoint"] = migrated["migrated_from"]
             if path.exists():
                 try:
                     loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -431,14 +540,12 @@ def author(wp, ws, tracer, task=None, feedback=None, checkpoint_dir=None):
             pending = [ref for ref in by_ref if ref in missing]
             preferred = [ref for ref in next_refs if ref in pending] if isinstance(next_refs, list) else []
             # Transport order, not a business partition. Author may reprioritize.
-            targets = _pack(preferred + pending, by_ref, FACT_CHARS)
-            names = set().union(*(_entities(by_ref[ref]) for ref in targets))
-            related = [ref for ref, row in by_ref.items() if ref not in targets and _entities(row) & names]
-            context = _pack(related, by_ref, CONTEXT_CHARS)
+            targets, context = _select_batch(payload, raw, by_ref, pending, preferred)
             required_context = []
             repair = None
             for number in range(attempt_limit):
-                messages, context = _fit_messages(payload, raw, targets, context, repair, required_context)
+                messages, context = _fit_messages(payload, raw, targets, context, repair,
+                                                  required_context, index_scope="pending_only")
                 entry = {"part": len(state["parts"]), "attempt": number+1,
                          "messages_hash": d._hash(messages), "status": "started"}
                 state["attempts"].append(entry)
@@ -470,7 +577,8 @@ def author(wp, ws, tracer, task=None, feedback=None, checkpoint_dir=None):
                         if _size([by_ref[ref] for ref in required]) > CONTEXT_CHARS:
                             raise ValueError("Requested context exceeds capacity; finish this group before requesting more")
                         proposed = _pack(required + context, by_ref, CONTEXT_CHARS)
-                        _, context = _fit_messages(payload, raw, targets, proposed, None, required)
+                        _, context = _fit_messages(payload, raw, targets, proposed, None,
+                                                   required, index_scope="pending_only")
                         required_context = required
                         repair = None
                         entry["status"] = "context_supplied"
@@ -481,6 +589,7 @@ def author(wp, ws, tracer, task=None, feedback=None, checkpoint_dir=None):
                     repair = {"previous_output": deepcopy(output), "validation_error": str(exc)}
                     continue
                 part = {"target_refs": targets, "context_refs": context, "repair": repair,
+                        "index_scope": "pending_only",
                         "messages_hash": d._hash(messages), "output": deepcopy(output)}
                 state["parts"].append(part)
                 raw, next_refs = merged, output.get("next_refs", [])

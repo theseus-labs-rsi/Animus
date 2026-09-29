@@ -67,10 +67,120 @@ def enumerate_l3_orders(ws: WorldState, max_events: int = 4) -> list[Order]:
     return out
 
 
+def _episode_orders(ws: WorldState, max_events: int = 4) -> list[Order]:
+    """One disjoint card set per actual causal episode and focus entity.
+
+    Causal roots come from the frozen world's existing ``caused_by`` edges.
+    Every card must exactly match a canonical event effect and the unchanged
+    timeline locator rules. Long episodes remain one task; no sliding windows
+    or combinations of the same facts are manufactured to increase supply.
+    """
+    legacy = {order.entity: order for order in enumerate_l3_orders(ws, max_events)}
+    event_rows = list(getattr(ws, "events", []) or [])
+    events = {event.get("id"): event for event in event_rows if isinstance(event, dict) and event.get("id")}
+    if len(events) != len(event_rows):
+        return list(legacy.values())
+    roots = {}
+    for event_id in sorted(events):
+        trail, current = set(), event_id
+        while current in events and current not in trail:
+            trail.add(current)
+            parent = events[current].get("caused_by")
+            if not parent:
+                roots[event_id] = current
+                break
+            current = parent
+    locators = {entity: {(card["field"], _norm(card.get("value")), card["session"]): card
+                        for card in _locatable_events(ws, entity)} for entity in ws.entities}
+    groups = {}
+    for event_id in sorted(roots):
+        event, root = events[event_id], roots[event_id]
+        for effect in event.get("effects", []):
+            if not isinstance(effect, dict):
+                continue
+            entity = effect.get("entity")
+            locator = (effect.get("field"), _norm(effect.get("set", effect.get("value"))), event.get("session"))
+            card = locators.get(entity, {}).get(locator)
+            if card is not None:
+                group = groups.setdefault((entity, root), {"cards": {}, "event_ids": set()})
+                group["cards"][locator] = card
+                group["event_ids"].add(event_id)
+    pools, used = {}, set()
+    for (entity, root), group in sorted(groups.items(), key=lambda item: (
+            item[0][0], min(card["session"] for card in item[1]["cards"].values()), item[0][1])):
+        cards = sorted(group["cards"].values(), key=lambda card: (card["date"], card["session"], card["field"]))
+        picked, sessions, fields = [], set(), set()
+        for card in cards:
+            if card["session"] not in sessions and card["field"] not in fields:
+                picked.append(card); sessions.add(card["session"]); fields.add(card["field"])
+        if len(picked) < MIN_EVENTS:
+            for card in cards:
+                if card["session"] not in sessions:
+                    picked.append(card); sessions.add(card["session"])
+        picked = sorted(picked, key=lambda card: (card["date"], card["session"]))[:max_events]
+        identities = {(entity, card["field"], _norm(card.get("value")), card["session"]) for card in picked}
+        if len(picked) < MIN_EVENTS or used.intersection(identities):
+            continue
+        used.update(identities)
+        pools.setdefault(entity, []).append(Order("L3_order", entity, "", gt=picked,
+            evidence_sessions=sorted({card["session"] for card in picked}),
+            aux={"scorer": "kendall_tau", "n_fields": len({card["field"] for card in picked}),
+                 "events": [dict(card) for card in picked],
+                 "supply_episode": {"version": 1, "basis": "frozen_causal_component",
+                                    "root_event_id": root, "event_ids": sorted(group["event_ids"])}}))
+    for entity, order in legacy.items():
+        if entity not in pools:
+            pools[entity] = [order]
+    # Give each entity its first independent episode before its next one.
+    return [pool[index] for index in range(max((len(pool) for pool in pools.values()), default=0))
+            for _entity, pool in sorted(pools.items()) if index < len(pool)]
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # L3 产线
 # ════════════════════════════════════════════════════════════════════════════
 class ProcessLine(ProductionLine):
+    def matches_carrier(self, carrier, entities, support):
+        events = (support.get('aux') or {}).get('events', [])
+        return (support.get('entity') in entities and
+                (not carrier.get('field') or any(e.get('field') == carrier['field'] for e in events)))
+
+    def construction_spec(self):
+        return {"process": {"minimum_distinct_change_periods": MIN_EVENTS,
+                "focus": "one_entity_per_episode", "locator": "unique_field_value_in_complete_history",
+                "initial_set_is_change": False}}
+
+    def construction_issues(self, carrier, blueprint, objects, events, observations):
+        from pipeline.world_agent import field_write_routes
+
+        etypes = {e["id"]: e for e in blueprint["event_types"]}
+        routes = field_write_routes(blueprint)
+        periods = {}
+        for event in events.values():
+            for effect in etypes.get(event.get("type"), {}).get("effect_fields", []):
+                entity = event.get("participants", {}).get(effect["role"])
+                if event.get("session", 0) > 0:
+                    periods.setdefault(entity, set()).add(event["session"])
+        for observation in observations:
+            entity, field = observation.get("entity"), observation.get("field")
+            kind = objects.get(entity, {}).get("type")
+            # Reading an event/relation-owned field does not create a change.
+            # Intrinsic observations are only opportunities; actual distinct,
+            # locatable changes remain the original line's world-time gate.
+            if kind in routes and field in routes[kind]["intrinsic_fields"]:
+                periods.setdefault(entity, set()).update(
+                    s for s in observation.get("sessions", []) if s > 0)
+        if not any(len(periods.get(entity, set())) >= MIN_EVENTS for entity in carrier["entities"]):
+            return [{"code": "process_periods", "actual": {e: sorted(periods.get(e, set())) for e in carrier["entities"]},
+                     "required": MIN_EVENTS, "message": "Allocate at least three distinct change periods on one focus entity"}]
+        return []
+
+    def value_issues(self, world, carrier):
+        periods = {entity: sorted({e["session"] for e in _locatable_events(world, entity)})
+                   for entity in carrier["entities"] if entity in world.entities}
+        return [] if any(len(p) >= MIN_EVENTS for p in periods.values()) else [
+            {"code": "process_locator", "actual": periods, "required": MIN_EVENTS,
+             "message": "Use distinct changed field values that are unique in the full history, including initial SET"}]
     id = "L3_process"
     title = "过程序列"
     memory = "跨字段事件的时序重建(把散落各文档的变更按发生先后排序)"
@@ -90,11 +200,21 @@ class ProcessLine(ProductionLine):
         return False, f"无实体凑够 {MIN_EVENTS} 个唯一可定位跨周事件(复现值已剔除)"
 
     def enumerate(self, ws, target: int = 200, wp=None) -> list[dict]:
+        delivery = isinstance(wp, dict) and "delivery_target" in wp
+        if delivery:
+            from pipeline.delivery_target import DeliveryTarget
+            DeliveryTarget.from_dict(wp["delivery_target"])
         out = []
-        for o in enumerate_l3_orders(ws)[:target]:
-            out.append({"line": self.id, "capability": "L3_order", "entity": o.entity,
-                        "field": o.field, "gt": o.gt, "evidence_sessions": o.evidence_sessions, "aux": o.aux})
-        return out
+        if delivery and target <= 0:
+            return out
+        orders = _episode_orders(ws) if delivery else enumerate_l3_orders(ws)
+        for o in orders:
+            order = {"line": self.id, "capability": "L3_order", "entity": o.entity,
+                     "field": o.field, "gt": o.gt, "evidence_sessions": o.evidence_sessions, "aux": o.aux}
+            if delivery and self.well_posed(order, ws)[0] != "well_posed":
+                continue
+            out.append(order)
+        return out[:target]
 
     def gt(self, ws, o: dict):
         """护城河:用 gt_event_order 重新从世界算出真值时序,再过滤到本题选中的卡片,

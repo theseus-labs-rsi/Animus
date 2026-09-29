@@ -90,6 +90,40 @@ class JsonRetryTests(unittest.TestCase):
         self.assertEqual(records[0]["attempt_id"], records[3]["attempt_id"])
         self.assertEqual(records[5]["attempt_id"], records[8]["attempt_id"])
 
+    def test_container_completion_keeps_exact_values_and_records_original(self):
+        raw = '{"reasons":["brace } and escaped \\\" quote"],"verdict":"fail"'
+        result, error, requests, records = self.exercise([raw], complete_containers=True)
+        self.assertIsNone(error)
+        self.assertEqual(result, json.loads(raw + '}'))
+        self.assertEqual(len(requests), 1)
+        event = next(r for r in records if r['event'] == 'json_result')
+        self.assertEqual(event['parse_mode'], 'container_completion')
+        self.assertEqual(event['raw_output'], raw)
+        self.assertEqual(event['appended_suffix'], '}')
+
+    def test_container_completion_never_supplies_missing_values_or_strings(self):
+        for raw in ('{"x":', '{"x":"unfinished', '{"x":tru', '[1,', '{"x" 1', '{"x":1]'):
+            with self.subTest(raw=raw), self.assertRaises(json.JSONDecodeError):
+                config.parse_complete_json(raw, complete_containers=True)
+        with self.assertRaises(json.JSONDecodeError):
+            config.parse_complete_json('{"x":1')
+
+    def test_five_actual_blueprint_replies_recover_without_new_requests(self):
+        import gzip
+        path = ROOT / 'tests/fixtures/council_world_container_failures.json.gz'
+        if not path.exists():
+            self.skipTest('Local historical response fixture is not distributed')
+        raws = json.loads(gzip.decompress(path.read_bytes()))
+        self.assertEqual(len(raws), 5)
+        for raw in raws:
+            parsed, suffix = config.parse_complete_json(raw, complete_containers=True)
+            self.assertEqual(suffix, '}')
+            self.assertEqual(parsed, json.loads(raw + '}'))
+            result, error, requests, records = self.exercise([raw], complete_containers=True)
+            self.assertIsNone(error)
+            self.assertEqual(result, parsed)
+            self.assertEqual(len(requests), 1)
+
     def test_three_attempts_exhausted_with_complete_trace(self):
         bad = ['{"attempt":1,}', '{"attempt":2,}', '{"attempt":3,}']
         result, error, requests, records = self.exercise(bad)

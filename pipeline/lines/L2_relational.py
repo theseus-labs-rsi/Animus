@@ -164,6 +164,20 @@ def _apportion_by_tier(tagged: list[dict], ratio: dict, target: int) -> list[dic
 # L2 产线
 # ════════════════════════════════════════════════════════════════════════════
 class RelationalLine(ProductionLine):
+    def carrier_field_issues(self, carrier, blueprint, objects):
+        # A path field belongs to one of its nodes, rather than every node.
+        fields = {t['id']: {f['name'] for f in t['fields']} for t in blueprint['entity_types']}
+        if carrier.get('field') and not any(carrier['field'] in fields[objects[e]['type']] for e in carrier['entities']):
+            return [{'code': 'undeclared_carrier_field', 'message': 'Choose a declared field on the relation path', 'field': carrier['field']}]
+        return []
+
+    def matches_carrier(self, carrier, entities, support):
+        path = (support.get('aux') or {}).get('path', [])
+        edges = (support.get('aux') or {}).get('resolved_relation_edges', [])
+        nodes = {edge[key] for edge in edges for key in ('from', 'to')}
+        return (support.get('entity') in entities and nodes <= entities and
+                (not carrier.get('field') or carrier['field'] in path))
+
     id = "L2_relational"
     title = "关系多跳"
     memory = "跨实体 N 跳遍历与聚合(A→B→C)"

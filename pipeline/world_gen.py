@@ -207,14 +207,21 @@ def _build_agentic_world(wp, tracer, log, existing, draft_out, repair_input, che
             feedback = repair_input.get("feedback")
             if not isinstance(feedback, dict) or not feedback:
                 raise WorldBlueprintError("Agent repair requires the original review feedback")
+            if "targets" in repair_input:
+                original_targets = feedback.get("repair_targets", {})
+                if repair_input["targets"] != {key: original_targets.get(key) for key in ("intrinsic", "structure")}:
+                    raise WorldBlueprintError("Agent repair targets differ from the original review feedback")
             # Saved opinions remain intact in the factory artifact. Repeated full
             # world/prompt envelopes do not belong in the planner's next context.
             feedback = {k: deepcopy(v) for k, v in feedback.items()
                         if k not in {"messages", "input_snapshot", "binding", "previous"}}
             resume = deepcopy(draft.get("agent"))
             state["parent_draft_hash"] = draft["draft_hash"]
+        from pipeline.instance_plan import enabled as instance_enabled
+        repair_options = ({"repair_max_calls":repair_input.get("max_calls", 4)}
+                          if repair_input is not None and instance_enabled(wp) else {})
         table, agent = generate_world(wp, tracer, existing=existing,
-            checkpoint_path=checkpoint_path, feedback=feedback, resume_state=resume, log=log)
+            checkpoint_path=checkpoint_path, feedback=feedback, resume_state=resume, log=log, **repair_options)
         state.update(merged=deepcopy(table), raw_merged=deepcopy(table), agent=deepcopy(agent),
                      initial_states=deepcopy(agent.get("initial_states", [])))
         if feedback is not None:
@@ -723,8 +730,8 @@ def _world_system(profile: dict, type_id: str, time_unit: str, open_schema: bool
                   identity_policy=identity_policy)
 
 
-def _finish_world(wp, ws, merged, profile, blueprint, narrative, protected_fields, log):
-    """Original deterministic finalization, also used for zero-call draft replay."""
+def _prepare_final_structure(wp, ws, profile, blueprint, log):
+    """Apply the deterministic structure used by final worlds and supply previews."""
     typed_contract = not blueprint.get("legacy_adapter", False)
     if typed_contract:
         active_l7 = any(str(item.get("line") or "").strip().lower().startswith("l7")
@@ -736,6 +743,28 @@ def _finish_world(wp, ws, merged, profile, blueprint, narrative, protected_field
     else:
         _affix_units(ws, profile, log)
         imprint_structure(ws, log, profile)
+
+
+def preview_supply_structure(wp, ws, log=lambda *args: None):
+    """Prepare an isolated draft exactly as finalization prepares its structure."""
+    from pipeline.world_blueprint import normalize_world_blueprint
+
+    blueprint = normalize_world_blueprint(wp)
+    profile = dict(wp.get("domain_profile") or {})
+    projected_fields = {}
+    for entity_type in blueprint["entity_types"]:
+        for field in entity_type.get("fields") or []:
+            projected_fields.setdefault(field.get("name"), dict(field))
+    profile["field_schema"] = list(projected_fields.values())
+    if seed_world_prompt(wp):
+        profile["seed_protected_fields"] = sorted(seed_protected_fields(wp))
+    _prepare_final_structure(wp, ws, profile, blueprint, log)
+    return ws
+
+
+def _finish_world(wp, ws, merged, profile, blueprint, narrative, protected_fields, log):
+    """Original deterministic finalization, also used for zero-call draft replay."""
+    _prepare_final_structure(wp, ws, profile, blueprint, log)
     validate_seed_world(wp, ws)
     final_checks = validate(ws, merged, profile)
     blocking = _blocking_world_defects(final_checks, narrative,

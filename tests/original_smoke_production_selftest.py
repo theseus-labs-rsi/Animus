@@ -46,6 +46,13 @@ class ProductionTests(unittest.TestCase):
         self.assertAlmostEqual(0.000525, result.profile["budget_consumed_cny"])
         self.assertEqual(0, result.profile["unsettled_reservation_calls"])
 
+    def test_fresh_wrapper_forwards_zero_haystack_ratio(self):
+        captured = []
+        result = self.run_tool(lambda *_: captured.extend(sys.argv), ["--haystack-ratio", "0"])
+        self.assertIsNone(result.error)
+        self.assertEqual(captured[captured.index("--haystack-ratio") + 1], "0.0")
+        self.assertEqual(result.api.calls, [])
+
     def test_missing_usage_keeps_reservation_and_blocks_next_request(self):
         answers = []
         def calls(directory, cfg):

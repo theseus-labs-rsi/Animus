@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from cli_fixture import write_cli as _fake_cli
 from pathlib import Path
 
 from agent_harnesses.runners.native_cli import _load_done, run
@@ -19,11 +20,6 @@ def _write_env(env_file: Path, cli: Path) -> None:
         encoding="utf-8",
     )
 
-
-def _fake_cli(path: Path, script: str) -> Path:
-    path.write_text(script, encoding="utf-8")
-    path.chmod(0o755)
-    return path
 
 
 def _plan(out: Path, env_file: Path) -> Path:
@@ -48,14 +44,14 @@ class ResumeTests(unittest.TestCase):
     def test_resume_reruns_failed_and_skips_completed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            failing = _fake_cli(root / "fail-claude", "#!/bin/sh\nexit 1\n")
+            failing = _fake_cli(root / "fail-claude", 'import sys\nsys.exit(1)\n')
             working = _fake_cli(
                 root / "ok-claude",
-                "#!/bin/sh\nprintf '%s\\n' '{\"result\":\"good-answer\"}'\n",
+                'print(\'{"result":"good-answer"}\')\n',
             )
             changed = _fake_cli(
                 root / "changed-claude",
-                "#!/bin/sh\nprintf '%s\\n' '{\"result\":\"should-not-appear\"}'\n",
+                'print(\'{"result":"should-not-appear"}\')\n',
             )
             env_file = root / "claude.env"
             out = root / "out"

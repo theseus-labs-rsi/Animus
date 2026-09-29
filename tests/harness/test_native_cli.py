@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+from cli_fixture import write_cli
 import tempfile
 import unittest
 from dataclasses import replace
@@ -56,7 +58,7 @@ class NativeCliTests(unittest.TestCase):
             env_file.write_text(
                 "ALT_GATEWAY_API_KEY=super-secret-value\n"
                 "ALT_GATEWAY_BASE_URL=https://example.invalid/v1\n"
-                "CLAUDE_BIN=/usr/bin/true\n",
+                f"CLAUDE_BIN={sys.executable}\n",
                 encoding="utf-8",
             )
             implementation = dict(system.implementation)
@@ -107,7 +109,7 @@ class NativeCliTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             sessions, docs = _materialize_workspace(root, workspace)
             self.assertEqual((sessions, docs), (1, 1))
-            self.assertIn("第一周，项目状态为进行中。", next((workspace / "sessions").rglob("*.md")).read_text())
+            self.assertIn("第一周，项目状态为进行中。", next((workspace / "sessions").rglob("*.md")).read_text(encoding="utf-8"))
             self.assertEqual(
                 _render_protocol(root),
                 (root / "public" / "protocol.txt").read_text(encoding="utf-8"),
@@ -141,7 +143,7 @@ class NativeCliTests(unittest.TestCase):
             env_file.write_text(
                 "DEEPSEEK_API_KEY=secret\n"
                 "DEEPSEEK_BASE_URL=https://user:password@example.invalid/v1\n"
-                "DSH_BIN=/usr/bin/true\n",
+                f"DSH_BIN={sys.executable}\n",
                 encoding="utf-8",
             )
             implementation = dict(system.implementation)
@@ -162,11 +164,7 @@ class NativeCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_cli = root / "fake-claude"
-            fake_cli.write_text(
-                "#!/bin/sh\nprintf '%s\\n' '{\"result\":\"fake-answer\"}'\n",
-                encoding="utf-8",
-            )
-            fake_cli.chmod(0o755)
+            fake_cli = write_cli(fake_cli, 'print(\'{"result":"fake-answer"}\')\n')
             env_file = root / "claude.env"
             env_file.write_text(
                 "ANTHROPIC_API_KEY=secret\n"
@@ -200,11 +198,7 @@ class NativeCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_cli = root / "fake-codex"
-            fake_cli.write_text(
-                "#!/bin/sh\nprintf '%s\\n' '{\"item\":{\"text\":\"fake-codex-answer\"}}'\n",
-                encoding="utf-8",
-            )
-            fake_cli.chmod(0o755)
+            fake_cli = write_cli(fake_cli, 'print(\'{"item":{"text":"fake-codex-answer"}}\')\n')
             env_file = root / "gpt.env"
             env_file.write_text(
                 "GPT_API_KEY=secret\n"
@@ -241,17 +235,7 @@ class NativeCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_cli = root / "fake-codex"
-            fake_cli.write_text(
-                "#!/bin/sh\n"
-                'while [ $# -gt 0 ]; do\n'
-                '  if [ "$1" = "--output-last-message" ]; then shift; out="$1"; fi\n'
-                "  shift\n"
-                "done\n"
-                "printf '%s\\n' 'answer-from-last-message' > \"$out\"\n"
-                "printf '%s\\n' '{\"item\":{\"text\":\"answer-from-stdout\"}}'\n",
-                encoding="utf-8",
-            )
-            fake_cli.chmod(0o755)
+            fake_cli = write_cli(fake_cli, 'import sys\nfrom pathlib import Path\nif "--output-last-message" in sys.argv:\n    Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text("answer-from-last-message\\n", encoding="utf-8")\nprint(\'{"item":{"text":"answer-from-stdout"}}\')\n')
             env_file = root / "gpt.env"
             env_file.write_text(
                 "GPT_API_KEY=secret\n"
@@ -297,11 +281,7 @@ class NativeCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_cli = root / "fake-claude"
-            fake_cli.write_text(
-                "#!/bin/sh\nprintf '%s\\n' '{\"result\":\"fake-answer\"}'\n",
-                encoding="utf-8",
-            )
-            fake_cli.chmod(0o755)
+            fake_cli = write_cli(fake_cli, 'print(\'{"result":"fake-answer"}\')\n')
             env_file = root / "claude.env"
             env_file.write_text(
                 "ANTHROPIC_API_KEY=sk-do-not-leak\n"
@@ -391,7 +371,7 @@ class NativeCliTests(unittest.TestCase):
             env_file.write_text(
                 "ANTHROPIC_API_KEY=secret\n"
                 "ANTHROPIC_BASE_URL=https://example.invalid/v1\n"
-                "CLAUDE_BIN=/usr/bin/true\n"
+                f"CLAUDE_BIN={sys.executable}\n"
                 "CLAUDE_MAX_TURNS=30\n",
                 encoding="utf-8",
             )
@@ -429,10 +409,7 @@ class NativeCliTests(unittest.TestCase):
                 }
             )
             fake_cli = root / "failing-claude"
-            fake_cli.write_text(
-                f"#!/bin/sh\nprintf '%s\\n' '{payload}'\nexit 1\n", encoding="utf-8"
-            )
-            fake_cli.chmod(0o755)
+            fake_cli = write_cli(fake_cli, "import sys\nprint(" + repr(payload) + ")\nsys.exit(1)\n")
             env_file = root / "claude.env"
             env_file.write_text(
                 "ANTHROPIC_API_KEY=secret\n"
@@ -479,11 +456,7 @@ class NativeCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_cli = root / "fake-dsh"
-            fake_cli.write_text(
-                "#!/bin/sh\nprintf '%s\\n' 'fake-dsh-answer'\n",
-                encoding="utf-8",
-            )
-            fake_cli.chmod(0o755)
+            fake_cli = write_cli(fake_cli, "print('fake-dsh-answer')\n")
             env_file = root / "deepseek.env"
             env_file.write_text(
                 "DEEPSEEK_API_KEY=dsh-secret\n"
@@ -555,7 +528,7 @@ class NativeCliTests(unittest.TestCase):
             env_file.write_text(
                 "DEEPSEEK_API_KEY=secret\n"
                 "DEEPSEEK_BASE_URL=https://example.invalid/v1\n"
-                "DSH_BIN=/usr/bin/true\n",
+                f"DSH_BIN={sys.executable}\n",
                 encoding="utf-8",
             )
             implementation = dict(system.implementation)
@@ -589,8 +562,7 @@ class NativeCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_cli = root / "slow-codex"
-            fake_cli.write_text("#!/bin/sh\nsleep 2\n", encoding="utf-8")
-            fake_cli.chmod(0o755)
+            fake_cli = write_cli(fake_cli, 'import time\ntime.sleep(2)\n')
             env_file = root / "gpt.env"
             env_file.write_text(
                 "GPT_API_KEY=secret\n"
@@ -630,11 +602,7 @@ class NativeCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_cli = root / "fake-claude"
-            fake_cli.write_text(
-                "#!/bin/sh\nprintf '%s\\n' '{\"result\":\"fake-answer\"}'\n",
-                encoding="utf-8",
-            )
-            fake_cli.chmod(0o755)
+            fake_cli = write_cli(fake_cli, 'print(\'{"result":"fake-answer"}\')\n')
             env_file = root / "claude.env"
             env_file.write_text(
                 "ANTHROPIC_API_KEY=runtime-secret\n"
@@ -691,11 +659,7 @@ class NativeCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_cli = root / "fake-claude"
-            fake_cli.write_text(
-                "#!/bin/sh\nprintf '%s\\n' '{\"result\":\"fake-answer\"}'\n",
-                encoding="utf-8",
-            )
-            fake_cli.chmod(0o755)
+            fake_cli = write_cli(fake_cli, 'print(\'{"result":"fake-answer"}\')\n')
             env_file = root / "claude.env"
             env_file.write_text(
                 "ANTHROPIC_API_KEY=secret\n"

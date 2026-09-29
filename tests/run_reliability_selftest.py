@@ -422,6 +422,8 @@ with tempfile.TemporaryDirectory() as td:
     grounding_run._save_manifest()
     grounding_run.write(factory.ART["questions"], [{"qid": str(i)} for i in range(3)])
     grounding_run.write(factory.ART["corpus"], {"corpus": {"sessions": []}})
+    grounding_run.write("00_about.json", {"public_protocol": "Explicit offline grounding fixture."})
+    grounding_run.write(factory.ART["whitepaper"], {})
     original_run_grounding = grounding_module.run_grounding
     grounding_module.run_grounding = lambda *_args: (
         [{"qid": str(i)} for i in range(3)],

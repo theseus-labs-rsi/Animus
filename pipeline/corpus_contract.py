@@ -11,6 +11,8 @@ import hashlib
 import json
 import re
 
+from pipeline import evidence_transport as wire
+
 VERSION = 11
 PUBLIC_RULE_SUPPORT_VERSION = "public-stage-rule-support-set/v1"
 PUBLIC_SOURCE_SUPPORT_VERSION = "public-source-assertion-support-set/v1"
@@ -409,12 +411,23 @@ class ReviewFormatError(ValueError):
         return {"path": self.path, "message": self.message}
 
 
-def _review_contract_hash():
-    return fingerprint({"version": VERSION, "system": REVIEW_SYSTEM,
+def _review_contract_hash(transport=wire.INLINE):
+    contract = {"version": VERSION, "system": REVIEW_SYSTEM,
                         "format_repair": FORMAT_REPAIR_INSTRUCTIONS,
                         "format_repair_version": FORMAT_REPAIR_VERSION,
                         "max_tokens": REVIEW_MAX_TOKENS, "locator_repair_system": LOCATOR_REPAIR_SYSTEM,
-                        "response_format": {"type": "json_object"}})
+                        "response_format": {"type": "json_object"}}
+    transport_contract = wire.contract(transport)
+    if transport_contract is not None:
+        contract["evidence_transport"] = transport_contract
+    return fingerprint(contract)
+
+
+def _validation_contract_hash(history):
+    try:
+        return _review_contract_hash(history.get("transport", wire.INLINE))
+    except (AttributeError, ValueError, TypeError):
+        return None
 
 
 def _validate_review_response(response, docs, targets, *, locator_errors=None):
@@ -580,11 +593,14 @@ def _review_attempt_payload(payload, previous=None):
     return result
 
 
+def _review_parameters():
+    return {"temperature": 0.0, "max_tokens": REVIEW_MAX_TOKENS,
+            "retries": 3, "strict_json": True, "response_format": {"type": "json_object"}}
+
+
 def _request_hash(payload):
     return fingerprint({"system": _review_attempt_system(payload), "payload": payload, "step": "corpus.review",
-                        "parameters": {"temperature": 0.0, "max_tokens": REVIEW_MAX_TOKENS,
-                                       "retries": 3, "strict_json": True,
-                                       "response_format": {"type": "json_object"}}})
+                        "parameters": _review_parameters()})
 
 
 def _parsed_review_opinion(response):
@@ -595,6 +611,8 @@ def _replay_review_validation(history):
     """Replay saved mechanical checks, including the reason a second call was admitted."""
     if not isinstance(history, dict) or history.get("version") != FORMAT_REPAIR_VERSION:
         raise ValueError("Missing review validation history")
+    transport = history.get("transport", wire.INLINE)
+    wire.contract(transport)
     payload, attempts = history["input_payload"], history["attempts"]
     if not isinstance(payload, dict) or "format_repair" in payload or not isinstance(attempts, list) or len(attempts) not in (1, 2):
         raise ValueError("Invalid review history inputs or attempt count")
@@ -619,6 +637,13 @@ def _replay_review_validation(history):
         request = _review_attempt_payload(payload, previous)
         if attempt.get("request_hash") != _request_hash(request):
             raise ValueError("Review request history changed")
+        if transport != wire.INLINE:
+            _messages, binding = wire.request(_review_attempt_system(request), request,
+                step="corpus.review", parameters=_review_parameters(), protocol=transport)
+            if attempt.get("transport_binding") != binding:
+                raise ValueError("Review transport binding changed or missing")
+        elif "transport_binding" in attempt:
+            raise ValueError("Unexpected transport binding on an inline review")
         try:
             opinion = _resolved_review_output(request, attempt["raw_output"])
             if request.get("format_repair", {}).get("mode") == "locator_patch":
@@ -688,7 +713,7 @@ def _receipt_validation_matches(receipt, doc, replay_cache=None):
 
 def review_documents(tracer, ws, session: int, docs: list[dict], *, context=None,
                      required_public_rule_ids=(), requirements=(), blind_reads=(),
-                     lexical_diagnostics=()) -> dict:
+                     lexical_diagnostics=(), evidence_transport=wire.INLINE) -> dict:
     context = context if context is not None else canonical_context(ws, session)
     requirements, blind_reads = deepcopy(list(requirements)), deepcopy(list(blind_reads))
     contents = [{"title": d.get("title", ""), "content": d.get("content", "")} for d in docs]
@@ -702,7 +727,7 @@ def review_documents(tracer, ws, session: int, docs: list[dict], *, context=None
             "future_hints_hashes": [fingerprint(items) for items in hints_by_document],
             "diagnostics": {"future_claim_hints": hints, "lexical": deepcopy(list(lexical_diagnostics)),
                             "authority": "unverified_lexical_hints"},
-            "review_contract_hash": _review_contract_hash(),
+            "review_contract_hash": _review_contract_hash(evidence_transport),
             "scope": "as_of_canonical_supportedness_and_requested_fidelity; semantic reviewer is fallible"}
     response = None
     history = None
@@ -740,6 +765,8 @@ def review_documents(tracer, ws, session: int, docs: list[dict], *, context=None
                    "CANON": context, "documents": contents, "blind_reads": blind_reads,
                    "future_claim_hints": hints, "lexical_diagnostics": deepcopy(list(lexical_diagnostics))}
         history = {"version": FORMAT_REPAIR_VERSION, "input_payload": deepcopy(payload), "attempts": []}
+        if evidence_transport != wire.INLINE:
+            history["transport"] = evidence_transport
         for attempt_number in (1, 2):
             request = _review_attempt_payload(payload, history["attempts"][-1] if attempt_number == 2 else None)
             attempt = {"attempt": attempt_number, "request_hash": _request_hash(request),
@@ -747,11 +774,12 @@ def review_documents(tracer, ws, session: int, docs: list[dict], *, context=None
             history["attempts"].append(attempt)
             response = None
             try:
+                messages, transport_binding = wire.request(_review_attempt_system(request), request,
+                    step="corpus.review", parameters=_review_parameters(), protocol=evidence_transport)
+                if evidence_transport != wire.INLINE:
+                    attempt["transport_binding"] = transport_binding
                 response = tracer.chat_json(
-                    "corpus.review", [{"role": "system", "content": _review_attempt_system(request)},
-                                      {"role": "user", "content": json.dumps(request, ensure_ascii=False)}],
-                    temperature=0.0, max_tokens=REVIEW_MAX_TOKENS, retries=3, strict_json=True,
-                    response_format={"type": "json_object"})
+                    "corpus.review", messages, **_review_parameters())
                 attempt["raw_output"] = deepcopy(response)
                 if not _parsed_review_opinion(response):
                     raise RuntimeError("Reviewer returned no parsed opinion or an execution error")
@@ -791,7 +819,7 @@ def attach_receipts(docs: list[dict], report: dict, session: int) -> None:
             or report.get("context_hash") != fingerprint(payload["CANON"])
             or report.get("requirements") != payload["requirements"]
             or report.get("blind_reads") != payload["blind_reads"]
-            or report.get("review_contract_hash") != _review_contract_hash()):
+            or report.get("review_contract_hash") != _validation_contract_hash(report.get("review_validation"))):
         raise ValueError("Review report differs from replayed raw validation history")
     contents = [{"title": d.get("title", ""), "content": d.get("content", "")} for d in docs]
     if fingerprint(contents) != report.get("documents_hash"):
@@ -1051,7 +1079,7 @@ def _review_receipt_matches(ws, session: int, doc: dict, context_hash=None,
         isinstance(refs, list) and all(isinstance(ref, str) for ref in refs)
         and receipt.get("version") == VERSION and receipt.get("status") == "passed"
         and receipt.get("session") == session
-        and receipt.get("review_contract_hash") == _review_contract_hash()
+        and receipt.get("review_contract_hash") == _validation_contract_hash(receipt.get("review_validation"))
         and receipt.get("content_hash") == fingerprint(doc.get("content", ""))
         and receipt.get("document_hash") == fingerprint({"title": doc.get("title", ""),
                                                          "content": doc.get("content", "")})

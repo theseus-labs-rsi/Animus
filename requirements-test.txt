@@ -1,0 +1,5 @@
+-r requirements-minimal.txt
+pytest==9.1.1
+fastapi==0.141.1
+starlette==1.7.0
+tiktoken==0.12.0

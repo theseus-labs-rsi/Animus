@@ -322,7 +322,7 @@ class GroundingExecutionBoundary(unittest.TestCase):
         kept, routing, review = self.fx.review_grounding(self.questions, self.corpus, self.protocol,
             chat_json=script, model="test")
         self.assertEqual(kept, old_final)  # The stale file can exactly match the successful subset.
-        self.assertTrue(routing["execution_stopped"])
+        self.assertFalse(routing["execution_stopped"])
         self.assertEqual(routing["caller_invocations"], 3)
         result = self.release(old_final, review)
         self.assertTrue(result["eligible"], result)
@@ -337,17 +337,17 @@ class GroundingExecutionBoundary(unittest.TestCase):
         self.assertTrue(routing["execution_complete"])
         self.assertEqual((kept, routing["n_pending"], routing["n_dropped"]), ([], 1, 0))
 
-    def test_latched_logical_calls_are_not_reported_as_provider_calls(self):
+    def test_question_bound_failures_attempt_each_candidate_once(self):
         from pipeline.grounding_review import execution_complete
         script = self.fx.Scripted(TimeoutError("offline provider failure"))
         questions = [*self.questions, {**self.questions[0], "qid": "third"}]
         kept, routing, review = self.fx.review_grounding(questions, self.corpus, self.protocol,
             chat_json=script, model="test")
-        self.assertEqual(len(script.calls), 1)
+        self.assertEqual(len(script.calls), 3)
         self.assertEqual((routing["caller_invocations"], routing["suppressed_after_failure"],
-                          routing["logical_calls_used"]), (1, 2, 3))
+                          routing["logical_calls_used"]), (3, 0, 3))
         self.assertIsNone(routing["paid_provider_calls"])
-        self.assertEqual(review["execution_accounting"]["caller_invocations"], 1)
+        self.assertEqual(review["execution_accounting"]["caller_invocations"], 3)
         self.assertFalse(execution_complete(review))
         self.assertEqual((kept, routing["n_pending"], routing["n_dropped"]), ([], 3, 0))
 

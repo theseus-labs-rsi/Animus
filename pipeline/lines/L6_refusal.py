@@ -141,6 +141,25 @@ class RefusalLine(ProductionLine):
     implemented = True
     requires: list[str] = []      # R3 窗外恒可行 → 近根线(R1/R2 富类型有则更强,见 feasible)
 
+    def carrier_field_issues(self, carrier, blueprint, objects):
+        """A refusal probe may lack the target field on the focus object.
+
+        T1_adjacent requires that the target field exists elsewhere in the
+        world while the focus owns a different, real lure field. The actual
+        absence and lure are certified by the original enumerator and
+        well-posed check after world authorship.
+        """
+        field = carrier.get("field")
+        if not field:
+            return []
+        declared = {item["name"] for kind in blueprint["entity_types"]
+                    for item in kind["fields"]}
+        if field not in declared:
+            return [{"code": "undeclared_carrier_field",
+                     "message": "The refusal target must be a real field somewhere in the world",
+                     "field": field}]
+        return []
+
     def feasible(self, ws, profile: dict) -> tuple[bool, str]:
         """恒可行(R3 窗外任何世界都能产);报告 R1/R2 富类型可用性,便于日志看清这一轮 L6 有没有对抗料。"""
         owners = _field_owners(ws)

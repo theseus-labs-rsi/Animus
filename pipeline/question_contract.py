@@ -13,7 +13,7 @@ import json
 import re
 import unicodedata
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 _STRICT_LINES = {"L1_timeline", "L3_process", "L5_conflict", "L6_refusal"}
 _INSUFFICIENT = "INSUFFICIENT_EVIDENCE"
 
@@ -65,10 +65,31 @@ def bind_question_world(order: dict, ws) -> dict:
     return result
 
 
-def build_question_contract(order: dict, wp: dict | None = None) -> dict:
+def _display_events(order: dict) -> list[dict]:
+    """Stable event-card presentation, independent of the correct chronology."""
+    events = list(order.get("gt") or [])
+    shown = sorted(events, key=lambda event: _digest({"entity": order.get("entity"),
+        "card": {key: event.get(key) for key in ("field", "value", "op")}}))
+    if len(shown) > 1 and shown == events:
+        shown = shown[1:] + shown[:1]
+    return shown
+
+
+def render_intent(order: dict, contract: dict | None = None) -> tuple[str, list]:
+    """Use the frozen compiled display; historical v1 retains its original text."""
+    from pipeline.lines import line_for
+    contract = contract or build_question_contract(order)
+    line = line_for(order.get("line", ""))
+    _intent, hide = line.intent(order) if line else ("", [])
+    return contract.get("canonical_question", _intent), hide
+
+
+def build_question_contract(order: dict, wp: dict | None = None, *, contract_version: int = CONTRACT_VERSION) -> dict:
     from pipeline.lines import line_for
     from eval.answer_task_review import POLICY_VERSION
 
+    if contract_version not in (1, CONTRACT_VERSION):
+        raise ValueError("Unknown question contract version")
     scoring_policy = ((wp or {}).get("quality_contract") or {}).get("scoring_policy")
     if scoring_policy not in (None, POLICY_VERSION):
         raise ValueError("Unknown question scoring policy")
@@ -138,6 +159,11 @@ def build_question_contract(order: dict, wp: dict | None = None) -> dict:
                 continue
             identity = {k: event.get(k) for k in ("field", "value", "op", "session", "date")}
             event_refs.append({"id": "event_" + _digest(identity)[:20], **identity})
+        if contract_version >= 2:
+            shown = _display_events(order)
+            cards = "、".join((f"「{event.get('field', '')}」变为 {event.get('value')}"
+                if event.get("value") else f"「{event.get('field', '')}」停止统计") for event in shown)
+            intent = f"请把【{order.get('entity', '')}】发生的下列事件按发生时间先后排序：{cards}。"
 
     required = []
     entity = order.get("entity") or ""
@@ -168,7 +194,7 @@ def build_question_contract(order: dict, wp: dict | None = None) -> dict:
         forbidden = [scalar] if isinstance(scalar, (str, int, float)) else []
     forbidden = [str(value) for value in forbidden if value is not None and str(value) and str(value) != _INSUFFICIENT]
 
-    semantic = {"version": CONTRACT_VERSION, "line": line_id, "capability": cap,
+    semantic = {"version": contract_version, "line": line_id, "capability": cap,
                 "entity": entity, "entity_type": order.get("entity_type"),
                 "answer_entity_type": order.get("answer_entity_type"), "answer_field": order.get("answer_field"),
                 "field": order.get("field", ""), "gold": gold,
@@ -187,6 +213,27 @@ def build_question_contract(order: dict, wp: dict | None = None) -> dict:
                         canonical_witness=deepcopy(order["gt"]),
                         reference_authority="proposed_not_mechanically_proven")
         semantic["parameters"]["process"] = deepcopy(aux.get("process"))
+    if contract_version >= 2:
+        semantic["answer_leakage_policy"] = {
+            "scope": "question_text_only",
+            "excluded_from_question_text": list(dict.fromkeys(forbidden + [str(value) for value in hide if value is not None])),
+            "reference_answer_scope": "gold_remains_the_required_answer",
+            "visible_inputs": "required_constraints_and_event_cards",
+            "legacy_field_scope": "hidden_values_and_forbidden_answer_values_apply_only_to_question_text",
+        }
+        semantic["time_coordinates"] = {
+            "session_index_base": 0, "display_period_index_base": 1,
+            "conversion": "display_period=session_index+1",
+            "refusal_probe_period_index_base": 1,
+            "refusal_probe_scope": "aux.probe.at_week_for_T2_window_is_already_a_display_period",
+            "gold_time_format": "preserve_original_gold_fields",
+        }
+        if event_refs:
+            ids = {_digest({key: ref.get(key) for key in ("field", "value", "op", "session", "date")}): ref["id"] for ref in event_refs}
+            semantic["event_display"] = {"version": "event-card-order/v1", "policy": "stable_hash_with_non_chronological_guard",
+                "event_ids": [ids[_digest({key: event.get(key) for key in ("field", "value", "op", "session", "date")})]
+                              for event in _display_events(order)],
+                "preserve_display_order_in_question": True}
     contract = {**semantic, "scoring_scope": "primary_answer",
                 "required_constraints": required,
                 "render_policy": "canonical_template" if line_id in _STRICT_LINES or getattr(line, "deterministic_phrasing", False) else "protected_slots",
@@ -225,7 +272,7 @@ def validate_question(question, contract: dict | None = None) -> list[dict]:
     issues = []
     def issue(code, message):
         issues.append({"code": code, "message": message})
-    if not isinstance(contract, dict) or contract.get("version") != CONTRACT_VERSION:
+    if not isinstance(contract, dict) or contract.get("version") not in (1, CONTRACT_VERSION):
         return [{"code": "missing_contract", "message": "A supported question contract is required"}]
     if (contract.get("value_schema") or {}).get("schema_error"):
         issue("invalid_schema", "Entity-specific field declaration is unresolved")
@@ -236,7 +283,7 @@ def validate_question(question, contract: dict | None = None) -> list[dict]:
         policy = contract.get("scoring_policy")
         rebuilt = build_question_contract(order, {
             "domain_profile": {"field_schema": [declaration]},
-            "quality_contract": {"scoring_policy": policy}})
+            "quality_contract": {"scoring_policy": policy}}, contract_version=contract["version"])
         if contract != rebuilt:
             issue("contract_mismatch", "Question metadata no longer matches its frozen semantics")
         if contract.get("canonical_question") != rebuilt.get("canonical_question"):
@@ -247,6 +294,8 @@ def validate_question(question, contract: dict | None = None) -> list[dict]:
     canonical = contract.get("canonical_question")
     if not isinstance(canonical, str) or not canonical.strip():
         issue("invalid_template", "No deterministic question template")
+    if contract.get("event_display") and normalized != _normal(canonical):
+        issue("event_display_changed", "Compiled event cards must retain their frozen presentation order")
     if contract.get("render_policy") == "semantic_review":
         # No substring/template test can decide whether a paraphrase preserves
         # task meaning. Release separately checks the version-bound LLM review.

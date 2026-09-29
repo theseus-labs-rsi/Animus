@@ -1,6 +1,7 @@
 """Exercise the real closed-loop driver and grounding stage without network."""
 from contextlib import ExitStack
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import socket
 import sys
@@ -54,10 +55,15 @@ class ClosedLoopSemanticStopTests(unittest.TestCase):
                 calls.append("orders")
                 r.write(factory.ART["orders"], qs)
 
+            def disclosure(r):
+                calls.append("disclosure")
+                r.write(factory.ART["disclosure"], {"status": "disabled"})
+
             def well_posed(r):
                 r.write("03_well_posed_report.json", {"passed": 3})
 
             def questions(r):
+                calls.append("questions")
                 candidates = qs[:1] if outcome == "none" and calls.count("world") == 1 else qs
                 r.write(factory.ART["questions"], candidates)
 
@@ -96,10 +102,19 @@ class ClosedLoopSemanticStopTests(unittest.TestCase):
                 raw_reviews.append(deepcopy(raw))
                 return deepcopy(questions[:keep]), report, raw
 
-            for name, fn in (("stage_world", world), ("stage_orders", orders),
+            replacements = {"world": world, "disclosure": disclosure,
+                            "orders": orders, "well_posed": well_posed,
+                            "questions": questions, "corpus": corpus, "quality": quality}
+            for name, fn in (("stage_world", world), ("stage_disclosure", disclosure), ("stage_orders", orders),
                              ("stage_well_posed", well_posed), ("stage_questions", questions),
                              ("stage_corpus", corpus), ("stage_quality", quality)):
                 stack.enter_context(patch.object(factory, name, fn))
+            # The supply driver now shares the registered material-first tail.
+            # Patch its service stages at that registry as well; keep the real
+            # grounding stage and the real driver/state bookkeeping exercised.
+            stack.enter_context(patch.object(factory, "STAGES", [
+                replace(stage, fn=replacements.get(stage.name, stage.fn))
+                for stage in factory.STAGES]))
             if semantic:
                 stack.enter_context(patch("pipeline.grounding_review.review_grounding", side_effect=grounding_result))
             else:
@@ -112,6 +127,14 @@ class ClosedLoopSemanticStopTests(unittest.TestCase):
             except Exception as exc:
                 exception = exc
             artifacts = {p.name: run.read(p.name) for p in run.dir.glob("*.json")}
+            # Input binding is newly attached by the real grounding producer;
+            # preserve exact assertions for the original semantic outcomes.
+            if "06_grounding_report.json" in artifacts:
+                self.assertIn("source_binding", artifacts["06_grounding_report.json"])
+                reports[-1]["source_binding"] = deepcopy(artifacts["06_grounding_report.json"]["source_binding"])
+            for index, name in enumerate(calls):
+                if name == "grounding":
+                    self.assertEqual(calls[index - 2:index], ["corpus", "questions"])
             return calls, deepcopy(run.manifest), artifacts, reports, raw_reviews, exception, result
 
     def assert_quality_warning_completion(self, outcome):

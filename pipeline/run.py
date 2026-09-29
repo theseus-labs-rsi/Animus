@@ -13,6 +13,7 @@ from typing import Callable
 from contextlib import contextmanager
 from copy import deepcopy
 from llm_trace import trace_scope, redact, failure_record
+from execution_control import StopState, check_stop, global_stop_exception, observe_failure
 import errno, json, os, time, threading, sys
 
 if os.name == "nt":
@@ -25,8 +26,38 @@ sys.path.insert(0, str(ROOT))                       # 保证 config 可导入(Tr
 RUNS_DIR = ROOT / "output" / "runs"
 
 
+def _io_path(path) -> Path:
+    """Use Windows extended absolute paths at the run's filesystem boundary.
+
+    A short run directory can still produce a >260-character hashed checkpoint
+    or atomic temporary filename. Descendants must retain this prefix for reads,
+    existence checks and cleanup as well as writes. No OS setting is changed.
+    """
+    path = Path(path)
+    if os.name != "nt":
+        return path
+    value = os.path.abspath(path)
+    if value.startswith(("\\\\?\\", "\\\\.\\")):
+        return Path(value)
+    if value.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + value[2:])
+    return Path("\\\\?\\" + value)
+
+
+def _path_label(path) -> str:
+    """Keep serialized path identity independent of the Windows IO prefix."""
+    value = str(path)
+    if os.name == "nt":
+        if value.startswith("\\\\?\\UNC\\"):
+            return "\\\\" + value[8:]
+        if value.startswith("\\\\?\\"):
+            return value[4:]
+    return value
+
+
 def _atomic_write_json(path: Path, obj) -> None:
     """在目标目录写临时文件后原子替换，避免进程中断留下半截 JSON。"""
+    path = _io_path(path)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         with tmp.open("w", encoding="utf-8") as f:
@@ -46,11 +77,19 @@ def _atomic_write_json(path: Path, obj) -> None:
                     raise
                 time.sleep(min(0.05 * (2 ** attempt), 0.5))
     finally:
-        tmp.unlink(missing_ok=True)
+        original_error = sys.exc_info()[0] is not None
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            # Cleanup must not hide the write/replace failure. The old target
+            # is intact and a blocked temporary file can be removed later.
+            if not original_error:
+                raise
 
 
 def _jsonl_record_count(path: Path) -> int:
     """以已经落盘的非空 JSONL 行为续跑调用计数的唯一基线。"""
+    path = _io_path(path)
     if not path.exists():
         return 0
     with path.open("r", encoding="utf-8", errors="replace") as f:
@@ -87,31 +126,27 @@ class Tracer:
         self.pfile = run.dir / "prompts.jsonl"
         self.n = _jsonl_record_count(self.pfile)
         self._lock = threading.Lock()
+        self._global_stop = StopState()
+
+    def check_global_stop(self):
+        self._global_stop.check()
 
     def chat_json(self, step, messages, **kw):
-        import config
-        t0 = time.time()
-        try:
-            with trace_scope(self.pfile.with_name("llm_attempts.jsonl"), step):
-                out = config.chat_json(messages, **kw)    # 网络调用在锁外 → 真并发
-            ok = not (isinstance(out, dict) and "__error__" in out)
-        except Exception as e:
-            out, ok = failure_record(e, secrets=tuple(value for key, value in os.environ.items()
-                if key.endswith(("API_KEY", "API_TOKEN", "ACCESS_TOKEN", "PASSWORD")))), False
-        latency_ms = int((time.time() - t0) * 1000)       # ★含 config 内部 3 次重试的总耗时(慢≈逼近超时)
-        with self._lock:                                  # 计数 + 写文件串行化
-            self.n += 1
-            self._log(self.n, step, messages, out, kw, ok, latency_ms)
-        return out
+        return self._call("chat_json", step, messages, kw)
 
     def chat_text(self, step, messages, **kw):
         """记录一次只要求自然语言正文的调用；异常仍作为显式失败返回。"""
+        return self._call("chat", step, messages, kw)
+
+    def _call(self, method, step, messages, kw):
         import config
+        check_stop()
         t0 = time.time()
         try:
             with trace_scope(self.pfile.with_name("llm_attempts.jsonl"), step):
-                out = config.chat(messages, **kw)
-            ok = isinstance(out, str) and bool(out.strip())
+                out = getattr(config, method)(messages, **kw)
+            ok = (isinstance(out, str) and bool(out.strip()) if method == "chat"
+                  else not (isinstance(out, dict) and "__error__" in out))
         except Exception as e:
             out, ok = failure_record(e, secrets=tuple(value for key, value in os.environ.items()
                 if key.endswith(("API_KEY", "API_TOKEN", "ACCESS_TOKEN", "PASSWORD")))), False
@@ -119,6 +154,10 @@ class Tracer:
         with self._lock:
             self.n += 1
             self._log(self.n, step, messages, out, kw, ok, latency_ms)
+        stopped = global_stop_exception(out)
+        if stopped is not None:
+            self._global_stop.record(stopped)
+        observe_failure(out)
         return out
 
     def _log(self, i, step, messages, out, kw, ok=True, latency_ms=0):
@@ -127,7 +166,7 @@ class Tracer:
                "system": next((m["content"] for m in messages if m["role"] == "system"), ""),
                "user": next((m["content"] for m in messages if m["role"] == "user"), ""),
                "params": {k: v for k, v in kw.items()
-                          if k in ("temperature", "max_tokens", "model", "retries", "strict_json")},
+                          if k in ("temperature", "max_tokens", "model", "retries", "strict_json", "complete_containers")},
                "out_preview": json.dumps(out, ensure_ascii=False)[:600] if isinstance(out, (dict, list)) else str(out)[:600]}
         secrets = tuple(value for key, value in os.environ.items()
                         if key.endswith(("API_KEY", "API_TOKEN", "ACCESS_TOKEN", "PASSWORD")))
@@ -157,7 +196,7 @@ class Run:
         self.scenario = scenario
         self.run_id = run_id
         self.tag = tag
-        self.dir = RUNS_DIR / run_id
+        self.dir = _io_path(RUNS_DIR / run_id)
         self.dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._manifest_lock = threading.RLock()
@@ -181,9 +220,11 @@ class Run:
         return (self.dir / artifact).exists()
 
     @contextmanager
-    def stage_write_lock(self, stage_name: str):
+    def stage_write_lock(self, stage_name: str, *, lock_name=".run.lock"):
         """以非阻塞进程锁保证同一 Run 同时只有一个 stage 写入。"""
-        lock_file = (self.dir / ".run.lock").open("a+b")
+        if lock_name not in (".run.lock", ".production.lock"):
+            raise ValueError("Unknown run lock")
+        lock_file = (self.dir / lock_name).open("a+b")
         acquired = False
         try:
             try:
@@ -350,6 +391,7 @@ class Run:
 def _run_stage_locked(run: Run, name: str, fn, artifact: str,
                       invalidate_names: list[str] | None = None):
     """在调用方已持有 Run 写锁时执行并记账一道 stage。"""
+    run.tracer.check_global_stop()
     if invalidate_names is not None:
         run.invalidate_after(name, invalidate_names)
     t = time.time()
@@ -357,10 +399,19 @@ def _run_stage_locked(run: Run, name: str, fn, artifact: str,
     run.log(f"→ stage: {name}")
     try:
         fn(run)
+        run.tracer.check_global_stop()
+        if artifact and not run.has(artifact):
+            raise RuntimeError(f"Stage {name} returned without publishing {artifact}")
     except BaseException as e:
+        try:
+            run.tracer.check_global_stop()
+        except BaseException as stopped:
+            if stopped is not e:
+                stopped.__cause__ = e
+                e = stopped
         run.fail_stage(name, e, time.time() - t)
         run.log(f"✗ stage {name} 失败:{type(e).__name__}: {str(e)[:200]}")
-        raise
+        raise e
     run.mark(name, artifact, time.time() - t)
 
 
@@ -387,6 +438,8 @@ def _finalize_run(run: Run, stage_names: list[str] | None = None) -> str:
             status = "invalidated"
         elif "running" in statuses:
             status = "running"
+        elif not all(run.is_done(name) for name in names):
+            status = "incomplete"
         else:
             status = "done"
         if status != "running":
@@ -410,8 +463,8 @@ def _update_run_metadata(run: Run, *, algo: dict | None = None,
 def _dependent_stage_names(stage_name: str, stages: list[Stage]) -> list[str]:
     """按 ``needs`` 求一个 stage 的传递后继，并保持注册顺序。
 
-    线性位置不是依赖关系：questions 与 corpus 是两条并行分支，强制重出题只应
-    失效最终 grounding，不能把完全不读 questions 的昂贵 corpus 一并作废。
+    按实际输入求依赖：更新 corpus 会使下游题面与审查重新检查；单独重出题
+    只失效 grounding 及后续结果，不回退到 corpus。
     """
     affected = {stage_name}
     changed = True
@@ -497,10 +550,11 @@ def drive(run: Run, stages: list, from_stage=None, to_stage=None, only=None, for
 # list_runs:扫 output/runs/*/manifest.json(新→旧),给 --list-runs 用
 # ════════════════════════════════════════════════════════════════════════════
 def list_runs() -> list:
-    if not RUNS_DIR.exists():
+    runs_dir = _io_path(RUNS_DIR)
+    if not runs_dir.exists():
         return []
     out = []
-    for d in sorted(RUNS_DIR.iterdir(), reverse=True):
+    for d in sorted(runs_dir.iterdir(), reverse=True):
         mf = d / "manifest.json"
         if mf.exists():
             try:

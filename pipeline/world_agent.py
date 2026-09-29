@@ -20,13 +20,19 @@ from pipeline.world_joint_plan import apply_initial_states, BASELINE_INSTRUCTION
 from pipeline.world_state import WorldState, assemble_world, validate
 from pipeline.blueprint_feasibility import BlueprintReviewRequested
 
-VERSION = "original-world-agent/v3"
+VERSION = "original-world-agent/v4"
 TABLE_KEYS = ("entities", "relations", "events", "initial_states")
 MAX_CONTEXT_CHARS = 120_000
 FORMAT_ATTEMPTS = 3
+INSTANCE_FORMAT = """实例输出格式（planner 与 writer 共用；planner 只安排任务，不生成下列事实表）：
+{"entities":[{"name":"唯一专名","type":"蓝图类型id","purpose":"可选作者用途说明","fields":{"内在字段":{"type":"stable","value":"值"},"变化字段":{"type":"evolving","trajectory":[{"session":0,"value":"值"},{"session":2,"value":"另一值"}]}}}],"relations":[{"id":"唯一id","type":"关系类型id","from":"实体名","to":"实体名","session":0}],"events":[{"id":"唯一id","type":"事件类型id","session":1,"participants":{"ticket":"T-017"},"effects":[{"entity":"T-017","field":"声明effect字段","set":"新值"}],"caused_by":"可省的父事件id"}],"initial_states":[]}。
+蓝图 roles/effect_fields 使用角色名描述字段归属；事件 participants 将角色名映射到具体实体名。effects 必须是数组，effects[i].entity 填 participants 对应的具体实体名，例如 T-017；角色 ticket 只用于 participants 的键。不要把 ticket 填成 entity，不要改用 role/role_type/role_name 键或角色字典。业务值仍由作者根据冻结业务要求生成。
+本实例格式优先于 task.intent、失败原稿及历史反馈中关于输出格式的建议；保留其中的业务要求，废弃冲突的格式建议。编译错误中的 expected role 用于解释字段归属，expected entity 才是应填写的具体实体。
+"""
 PLANNER_SYSTEM = """你管理原 pipeline 的世界生成。任务边界、共享对象、先后依赖由你按业务判断，计划可随实际结果修订。每次只输出一个动作 JSON。
 目标是逐步建立同一个世界。优先让完整业务过程的对象、关系、初态、事件一起生成；不要按固定实体数、类型或时间窗口机械切割。先安排整体布局，再细化下一项工作；可合并尚未完成的任务。合法稳定、未知、未触发情形可以保留。
 所有原任务/蓝图/日历保持不变；数量为全局最低要求，每个工作单元无需满足全部最低要求。机制需要真实对象上的前后过程，文字计划和数量本身不能证明业务机制成立。
+generation_brief 是全局创作目标：结合 active_lines、line_mapping、traps 和 corpus_plan 安排业务单元，不向每个单元分派全部目标。write.intent 只交代本单元需要落实的能力、对象、来源、时间变化、未知与冲突，以及所需依赖；writer 不接收剩余全局计划。区分事实发生与获取时间，公开渠道仅按蓝图已有字段/关系/事件表达，下游继续完成公开安排。不要预写最终题目和答案，不改变冻结规模或种子要求。
 可用动作：
 1. {"action":"inspect","reason":"为何需要这些事实","read_entities":["已有专名"],"read_events":["已有事件id"],"read_units":["可选，撤回/已接受单元id"]}：按引用读取实际完整字段历史及有关结构，下轮看到结果。
 2. {"action":"write","unit_id":"本次唯一id","intent":"完整业务过程及边界、需要新增的角色/对象、落实的机制与先后过程","plan":"简洁的剩余工作安排","read_entities":["本任务会引用的已有实体"],"read_events":["依赖的已有事件id"]}：委托作者补充一段实际世界。旧实体须读取，作者只新建实体，旧对象的变化通过新关系/事件表达。不要重复输出已接受的事实。
@@ -35,15 +41,18 @@ PLANNER_SYSTEM = """你管理原 pipeline 的世界生成。任务边界、共�
 5. {"action":"report_unresolved","reason":"具体无法完成的要求或上下文问题"}：如实停止。
 6. {"action":"request_blueprint_review","reason":"原任务要求与哪项蓝图约束冲突，引用失败证据","suggestion":"建议上游复核哪些字段约束"}：请求原白皮书作者复核。你不能改蓝图；上游可能拒绝修改。先区分自身事实错误与约束矛盾，不能仅因生成失败就要求删业务要求。
 同类错误反复出现时，结合 prior_failures 重新判断原因；可 inspect 读全旧事实，revise 更早的错误单元，或请求上游约束复核。循环确认/重开若受到 states 单向顺序阻碍，应提交矛盾证据。不要通过更换 unit_id 反复提交相同错误。occupied_ids 只列全局已用编号，实际业务事实需按引用读取。
+相同格式问题再次出现时，用共享实例格式和具体错误位置纠正；若一个提案涉及多段业务过程，重新选择较小且有完整依赖的业务单元，不重复重写全部世界。边界仍由你按业务判断，禁止机械按实体个数或固定期次切分。
 执行输出不足或上下文过大时缩小工作单元，保留已接受成果。外部审阅意见可以质疑，须基于原任务和事实逐项回应；可修改，也可给出依据反驳并保持事实，后续原语义闸将独立重审。新审阅反馈不得无回应直接 finish。
-只输出该动作所需字段，禁止编造问题、答案、评分或另建世界。"""
+只输出该动作所需的简短 JSON，intent/plan 使用简洁文字；事实表与事件 JSON 留给 writer，禁止编造问题、答案、评分或另建世界。
+""" + INSTANCE_FORMAT
 
 AUTHOR_SYSTEM = """你是原世界阶段的一位业务作者。完成 planner 指定的一个业务过程。输入含冻结业务要求/完整蓝图/日历，以及明确读取的真实世界上下文。只写本单元增量。
 把同一业务过程的内在字段、关系、初态、事件和因果共同考虑。保持公司/报告期/版本/来源/人物身份一致；业务含义由你理解，程序只检查类型与引用。若缺少信息，可返回 {"needs_context":"具体缺什么，建议读取哪些已有对象"}，不得猜测未读的已有事实。
-严格 JSON：{"entities":[{"name":"唯一专名","type":"蓝图类型id","purpose":"可选作者用途说明","fields":{"内在字段":{"type":"stable","value":"值"},"变化字段":{"type":"evolving","trajectory":[{"session":0,"value":"值"},{"session":2,"value":"另一值"}]}}}],"relations":[{"id":"唯一id","type":"关系类型id","from":"实体名","to":"实体名","session":0}],"events":[{"id":"唯一id","type":"事件类型id","session":1,"participants":{"角色":"实体名"},"effects":[{"entity":"角色所指实体","field":"声明effect字段","set":"新值"}],"caused_by":"可省的父事件id"}],"initial_states":[]}。
+task.intent 是当前单元的业务边界，seed 与蓝图是全局约束；本次只完成当前单元，保留有业务依据的未知与冲突，不为凑可回答题补写确定值。需要的旧事实必须在 read_context 中；缺少依赖时返回 needs_context。
 entities 只创建新对象，必须包含本类型全部内在字段。relation-owned/event-owned 字段仅通过关系、事件与合法 initial_states 生成，禁止在 entities.fields 暗写结构字段。静态关系 session=0，时变关系按业务安排，禁止重复边凑数量。事件角色准确且互异，effects 恰好覆盖声明，每个效果造成真实变化；因果 caused_by 引用真实父事件并遵守声明精确时间差。父事件可以是本次新增，也可以是明确读取的已有事件。
+内在字段按 fact_time_contract 选择 stable 或 evolving；stable 从窗口开始即成立，后期首次成立的事实写对应 session 的轨迹，不用公开或补录说明代替真值时点。
 对已有实体仅引用上下文里完整读取的实体，不改写其既有字段；所有旧事件/关系保留，新增实例id唯一。同一字段同一期不得双写冲突。数量目标在整个世界验收，本单位只完成指定业务范围，禁止填满全世界。不要输出 cascades 或额外事实字段。
-""" + BASELINE_INSTRUCTION + """
+""" + INSTANCE_FORMAT + BASELINE_INSTRUCTION + """
 回复只能包含一个完整 JSON 对象，不得在对象前后添加说明或代码围栏。
 业务留痕通过蓝图声明的事实字段、关系和事件表达；若任务要求的留痕无法用当前蓝图表达，返回 needs_context 说明缺口，交由 planner 重排任务。
 """
@@ -56,12 +65,22 @@ def _digest(value):
 
 def _binding(wp, existing):
     directory = Path(__file__).parent
+    supply_sources = (["supply.py", "delivery_target.py", "lines/__init__.py"] +
+                      [str(path.relative_to(directory)).replace("\\", "/") for path in sorted((directory / "lines").glob("L*.py"))]) if wp.get("delivery_target") else []
+    if (wp.get("supply_plan") or {}).get("version") == 2:
+        supply_sources.append("supply_capacity.py")
+    from pipeline.instance_plan import enabled
+    if enabled(wp):
+        supply_sources.extend(["instance_plan.py", "instance_executor.py", "capability_contract.py"])
+        from pipeline.construction import enabled as construction_enabled
+        if construction_enabled(wp):
+            supply_sources.extend(["construction.py", "plan_transactions.py", "lines/base.py"])
     return {"version": VERSION, "wp_hash": _digest(wp),
             "existing_hash": _digest(existing.to_dict() if existing is not None else None),
             "model": config.STRUCTURE_MODEL,
             "implementation": {name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
                                for name in ("world_agent.py", "world_gen.py", "world_state.py", "world_blueprint.py",
-                                            "world_joint_plan.py", "seed_world.py", "value_types.py", "blueprint_feasibility.py")}}
+                                            "world_joint_plan.py", "seed_world.py", "value_types.py", "blueprint_feasibility.py", *supply_sources)}}
 
 
 def _save(path, state):
@@ -118,25 +137,49 @@ def _compiled(table, blueprint, existing, complete, wp=None):
     return world, applied, initial, issues
 
 
-def _context(wp, blueprint):
-    calendar = WorldState(n_sessions=blueprint["temporal_model"]["n_sessions"], world_blueprint=blueprint)
+def field_write_routes(blueprint):
+    """Return the ownership map shared by authors and construction checks."""
     ownership = {}
     for kind in blueprint["entity_types"]:
         routes = {f["name"]: [] for f in kind["fields"]}
-        for relation in blueprint["relation_types"]:
+        for relation in blueprint.get("relation_types", []):
             side = relation_owner_side(blueprint, relation)
             if relation[side + "_type"] == kind["id"]:
                 routes[relation["field"]].append({"via": "relation", "type": relation["id"]})
-        for event in blueprint["event_types"]:
+        for event in blueprint.get("event_types", []):
             for effect in event["effect_fields"]:
                 if event["roles"][effect["role"]] == kind["id"]:
                     routes[effect["field"]].append({"via": "event", "type": event["id"], "role": effect["role"]})
         ownership[kind["id"]] = {"intrinsic_fields": [name for name, route in routes.items() if not route],
                                 "structure_fields": {name: route for name, route in routes.items() if route}}
-    return {"business": seed_business_context(wp), "blueprint": blueprint, "field_write_routes": ownership,
+    return ownership
+
+
+def _context(wp, blueprint):
+    from pipeline.world_state import intrinsic_fact_time_contract
+    calendar = WorldState(n_sessions=blueprint["temporal_model"]["n_sessions"], world_blueprint=blueprint)
+    ownership = field_write_routes(blueprint)
+    context = {"business": seed_business_context(wp), "blueprint": blueprint, "field_write_routes": ownership,
+            "fact_time_contract": intrinsic_fact_time_contract(calendar.date_of_session),
             "calendar": [{"session": session, "date": calendar.date_of_session(session)}
                          for session in calendar.sessions()],
-            "world_brief": {key: deepcopy(wp[key]) for key in ("scenario", "shared_world_spec") if key in wp}}
+            "world_brief": {key: deepcopy(wp[key]) for key in ("scenario", "shared_world_spec") if key in wp},
+            "generation_brief": {key: deepcopy(wp[key]) for key in
+                                 ("active_lines", "line_mapping", "traps", "corpus_plan", "supply_plan") if key in wp}}
+    if len(json.dumps(context, ensure_ascii=False)) > MAX_CONTEXT_CHARS:
+        raise WorldBlueprintError("frozen world context exceeds limit; requirements were not truncated")
+    return context
+
+
+def _writer_context(frozen, action):
+    # Preserve the complete schema, calendar and seed constraints. The planner
+    # selects the business scope; do not guess relevance from entity strings.
+    local = {key: deepcopy(value) for key, value in frozen.items()
+             if key not in ("generation_brief", "world_brief")}
+    local["task"] = {key: deepcopy(action[key]) for key in
+                     ("action", "unit_id", "intent", "read_entities", "read_events", "read_units", "instance_units")
+                     if key in action}
+    return local
 
 
 def _index(world, blueprint):
@@ -255,9 +298,18 @@ def _unit_issues(raw, context, world, blueprint):
     return issues
 
 
-def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=None, log=print, resume_state=None):
+def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=None, log=print, resume_state=None,
+                   repair_max_calls=None):
     """Return (compiler-ready raw table, audited metadata); never publish a world."""
     blueprint = normalize_world_blueprint(wp)
+    from pipeline.instance_plan import enabled as instance_enabled
+    planned = instance_enabled(wp)
+    if planned and not wp.get("business_instance_plan"):
+        raise WorldBlueprintError("Executable business instance plan required before world authorship")
+    if planned:
+        from pipeline.instance_executor import generate_world as execute_instances
+        return execute_instances(wp, tracer, existing, checkpoint_path, feedback, log, resume_state,
+                                 repair_max_calls=repair_max_calls)
     binding = _binding(wp, existing)
     policy = wp.get("world_generation") or {}
     max_steps = policy.get("max_steps", min(240, max(32, sum(t["count"] for t in blueprint["entity_types"]) * 3)))
@@ -266,13 +318,17 @@ def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=Non
     state = {"version": VERSION, "binding": binding, "units": [], "retired_units": [],
              "log": [], "status": "building", "steps": 0, "feedback_history": [],
              "observation": None, "plan": "", "feedback_revision_required": False, "issue_responses": [],
-             "truncated_work": []}
+             "truncated_work": [],
+             "input_snapshot": {"whitepaper": deepcopy(wp), "blueprint": deepcopy(blueprint),
+                                "max_steps": max_steps}}
     recovered = (json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
                  if checkpoint_path is not None and Path(checkpoint_path).exists() else resume_state)
     if recovered is not None:
         state = deepcopy(recovered)
         if (state.get("checkpoint_hash") != _digest({k: v for k, v in state.items() if k != "checkpoint_hash"})
-                or state.get("binding") != binding):
+                or state.get("binding") != binding
+                or state.get("input_snapshot") != {"whitepaper": wp, "blueprint": blueprint,
+                                                   "max_steps": max_steps}):
             raise WorldBlueprintError("world agent checkpoint input/source binding mismatch")
     state.setdefault("prior_failures", [])
     if feedback and (not state["feedback_history"] or state["feedback_history"][-1]["hash"] != _digest(feedback)):
@@ -280,10 +336,12 @@ def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=Non
         state["feedback_revision_required"] = bool(state["units"])
         state["status"] = "building"
         state["observation"] = {"review_feedback": deepcopy(feedback), "revision_required": bool(state["units"])}
-    frozen = _context(wp, blueprint)
-
     def save():
         _save(checkpoint_path, state)
+
+    # Keep the exact scaled input even if context construction or a later
+    # factory rollback fails before the first accepted business unit.
+    save()
 
     def call(step, payload, system, max_tokens):
         if len(json.dumps(payload, ensure_ascii=False)) > MAX_CONTEXT_CHARS:
@@ -320,6 +378,7 @@ def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=Non
             raise
 
     try:
+        frozen = _context(wp, blueprint)
         while True:
             world, applied, initial, integrity = _compiled(_combine(state["units"]), blueprint, existing, False, wp)
             if integrity:
@@ -370,7 +429,7 @@ def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=Non
                     work_hash = _digest({key: action.get(key) for key in ("intent", "read_entities", "read_events", "read_units")})
                     if work_hash in state["truncated_work"]:
                         raise WorldBlueprintError("identical truncated work cannot be retried; change the business boundary/intent or read scope")
-                    author_input = {**frozen, "task": action, "read_context": context,
+                    author_input = {**_writer_context(frozen, action), "read_context": context,
                                     "occupied_names": list(world.entities),
                                     "occupied_ids": {"relations": [r["id"] for r in world.relations],
                                                      "events": [e["id"] for e in world.events]},
@@ -433,6 +492,13 @@ def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=Non
                     if issues:
                         state["observation"] = {"finish_rejected": issues}
                     else:
+                        if wp.get("delivery_target"):
+                            from pipeline.supply import finish_feedback
+                            feedback = finish_feedback(wp, world, state)
+                            if feedback is not None:
+                                state["observation"] = feedback
+                                save()
+                                continue
                         state.update(status="completed", initial_states=initial, result_hash=_digest(applied), feedback_revision_required=False)
                         save()
                         return applied, deepcopy(state)
@@ -448,6 +514,11 @@ def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=Non
                                 "prior_failures": deepcopy(state["prior_failures"][-5:])}
                     state.update(status="blueprint_review_requested", upstream_request=evidence)
                     save()
+                    if ((wp.get("supply_plan") or {}).get("version") == 2
+                            and isinstance(evidence["last_observation"], dict)
+                            and "supply_shortfall" in evidence["last_observation"]):
+                        from pipeline.supply_capacity import CapacityReviewRequested
+                        raise CapacityReviewRequested(evidence)
                     raise BlueprintReviewRequested(evidence)
                 else:
                     raise WorldBlueprintError("unknown planner action; use inspect/write/revise/finish/report_unresolved")
@@ -457,6 +528,8 @@ def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=Non
                 if state["status"] == "unresolved":
                     raise
                 state["observation"] = {"action_rejected": str(error)}
+                if hasattr(error,"findings"):
+                    state["observation"]["findings"] = deepcopy(error.findings)
             save()
     except Exception as error:
         if state["status"] not in ("execution_error", "unresolved", "blueprint_review_requested"):

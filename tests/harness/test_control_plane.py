@@ -268,7 +268,8 @@ class PlanTests(unittest.TestCase):
         registry = load_registry()
         base = DIAGNOSTIC_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as tmp:
-            base = base.replace('output_root = "output"', f'output_root = "{Path(tmp) / "output"}"')
+            base = base.replace('output_root = "output/eval"',
+                                f'output_root = "{(Path(tmp) / "output").as_posix()}"')
             base = base.replace("limit = 2", "limit = 1")
             config_path = Path(tmp) / "experiment.toml"
             config_path.write_text(base, encoding="utf-8")

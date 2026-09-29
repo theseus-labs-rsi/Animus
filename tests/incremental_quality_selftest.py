@@ -85,7 +85,7 @@ class IncrementalQualityTests(unittest.TestCase):
             done.add(0)
             save()
             raise RuntimeError("fixture interruption")
-        with patch.object(factory, "render_corpus", interrupted):
+        with patch.object(factory, "render_corpus", interrupted), self.assertRaisesRegex(RuntimeError, "fixture interruption"):
             factory.stage_corpus(self.run)
         self.assertEqual((self.run.dir / factory.ART["corpus"]).read_bytes(), old_bytes)
         self.assertTrue(self.run.has(factory.CORPUS_CKPT))
@@ -103,7 +103,7 @@ class IncrementalQualityTests(unittest.TestCase):
             done.add(0)
             save()
             raise RuntimeError("fixture interruption")
-        with patch.object(factory, "render_corpus", interrupted):
+        with patch.object(factory, "render_corpus", interrupted), self.assertRaisesRegex(RuntimeError, "fixture interruption"):
             factory.stage_corpus(self.run)
         def resume(wp, ws, target, tracer, corpus, done, save, log, **scope):
             self.assertIsNone(scope["only_entities"])

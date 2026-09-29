@@ -140,7 +140,8 @@ class HaystackTests(TestCase):
             run.write("05_corpus.json", original)
             self.tracer.chat_text.side_effect = ["周边行政安排。" * 200, {"__error__": "offline transport"},
                                                 "周边公告。" * 200, "周边活动。" * 200, "周边活动。" * 200]
-            factory.stage_corpus(run)
+            with self.assertRaisesRegex(RuntimeError, "offline transport"):
+                factory.stage_corpus(run)
             self.assertEqual(run.read("05_corpus.json"), original)
             saved = run.read(factory.CORPUS_CKPT)
             self.assertEqual(saved["done_weeks"], [0, 1])

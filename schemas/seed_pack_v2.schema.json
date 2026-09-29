@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:memory-bench-factory:seed-pack:v2",
-  "title": "Memory benchmark seed pack v2",
+  "$id": "urn:animus:seed-pack:v2",
+  "title": "Animus seed pack v2",
   "description": "Shape contract. pipeline.seed_pack additionally validates finite JSON, unique identities, reference closure, source permissions, date validity, blueprint executability, statement conditions, and contract digests. review.blocking_issues gates generation, not archive validation.",
   "type": "object",
   "properties": {

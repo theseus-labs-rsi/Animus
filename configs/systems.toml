@@ -1,5 +1,5 @@
 schema_version = 2
-note = "Stable harness/memory registry. Models, endpoints, budgets, and smoke limits belong to experiments."
+note = "Stable evaluation-system registry. Models, endpoints, budgets, and smoke limits belong to experiments."
 
 [[systems]]
 schema_version = 2

@@ -172,7 +172,7 @@ A mechanism describes what makes the domain non-trivial. It should specify:
 - participating entity types;
 - required relations and events;
 - fields whose values change;
-- the failure modes a memory system should be tested on;
+- the failure modes the benchmark should test;
 - which benchmark capability lines it can support;
 - what must not be inferred.
 

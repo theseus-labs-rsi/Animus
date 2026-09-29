@@ -1,0 +1,16 @@
+{
+  "backend": "native_four",
+  "targets": [
+    {"id": "codex-gpt56-sol", "system": "native.codex", "model_label": "gpt-5.6-sol", "model_id": "gpt-5.6-sol", "endpoint_profile": "GPT", "protocol_style": "responses"},
+    {"id": "dsh-deepseek-v41-flash", "system": "native.dsh", "model_label": "deepseek-v4.1-flash", "model_id": "deepseek-v4.1-flash", "endpoint_profile": "DEEPSEEK", "protocol_style": "openai-completions"},
+    {"id": "codex-gpt53-codex", "system": "native.codex", "model_label": "gpt-5.3-codex", "model_id": "gpt-5.3-codex", "endpoint_profile": "GPT", "protocol_style": "responses"},
+    {"id": "dsh-deepseek-v4-flash-0731", "system": "native.dsh", "model_label": "deepseek-v4-flash-0731", "model_id": "deepseek-v4-flash-0731", "endpoint_profile": "DEEPSEEK", "protocol_style": "openai-responses"}
+  ],
+  "judge_model": "glm-5.3-flash",
+  "max_judge_calls": 2000,
+  "workers": 4,
+  "parallel_targets": 2,
+  "timeout_s": 600,
+  "keep_easy_ratio": 0,
+  "seed": 0
+}

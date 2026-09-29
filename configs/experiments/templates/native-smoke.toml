@@ -1,0 +1,51 @@
+schema_version = 2
+experiment_id = "native-cli-office-smoke"
+track = "native"
+output_root = "output/eval"
+
+# 离线测试夹具。正式运行时改为生成产物路径。
+[[benchmarks]]
+path = "tests/harness/fixtures/office__20260902-121616"
+corpus_variant = "filtered"
+allow_unmet = true
+
+[[targets]]
+id = "claude-code-claude46"
+system = "native.claude-code"
+model_label = "claude-4.6"
+model_id = "claude-4-6"
+endpoint_profile = "ANTHROPIC"
+protocol_style = "anthropic-messages"
+
+[[targets]]
+id = "codex-gpt56-sol"
+system = "native.codex"
+model_label = "gpt-5.6-sol"
+model_id = "gpt-5.6-sol"
+endpoint_profile = "GPT"
+protocol_style = "responses"
+
+[[targets]]
+id = "dsh-deepseek-v41-flash"
+system = "native.dsh"
+model_label = "deepseek-v4.1-flash"
+model_id = "deepseek-v4.1-flash"
+endpoint_profile = "DEEPSEEK"
+protocol_style = "openai-responses"
+
+[protocol]
+version = "native-cli-smoke-v2"
+network_mode = "closed"
+filler_policy = "as_provided"
+hidden_asset_policy = "deny"
+scoring = "disabled_for_chain_smoke"
+
+[execution]
+mode = "smoke"
+limit = 2
+seed = 0
+# 并发度默认 1（完全串行）。questions_in_parallel 是单 run 内同时跑几题；
+# parallel_plans 是同时跑几个 target。两者都不进 fingerprint，随 --resume 可改。
+# questions_in_parallel = 3
+# parallel_plans = 3
+# keep_scratch = true   # 保留 workspace/ 与 runtime/ 临时区以便排障；默认在 run 结束后删除

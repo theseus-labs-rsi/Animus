@@ -1,0 +1,98 @@
+[
+  {
+    "source": "output/harness_validation_20260916T0235/runs/glm-4.7-nothinking/game_1/results.jsonl",
+    "source_line": 5,
+    "source_sha256": "d94755b750413aae433c41b184d1f474e7fee38b6877761f07d95a01534c46de",
+    "key": "4:L4_preference:铁腕将军副官:行事路线倾向",
+    "question": {
+      "qid": null,
+      "line": "L4_preference",
+      "capability": "L4_preference",
+      "entity": "铁腕将军副官",
+      "field": "行事路线倾向",
+      "question": "根据铁腕将军副官这12期行事路线倾向的记录，它一贯的整体倾向更偏向哪一种？",
+      "gt": "正义",
+      "aux": {
+        "options": [
+          "正义",
+          "中立",
+          "谋略",
+          "暴力"
+        ],
+        "n_total": 12,
+        "n_pref": 7,
+        "n_runner": 2,
+        "latest": "谋略",
+        "ans_kind": "text"
+      },
+      "strict_scoring": null
+    },
+    "pred": "根据12期记录统计，铁腕将军副官的行事路线倾向为：\n\n周期0：正义\n周期1：正义\n周期3：中立\n周期4：暴力\n周期5：正义\n周期6：中立\n周期9：正义\n周期10：正义\n周期11：谋略\n\n整体趋势（首期正义 vs 末期谋略）：上升</think>上升",
+    "historic_correct": true,
+    "expected_correct": false
+  },
+  {
+    "source": "output/harness_validation_20260916T0235/runs/glm-4.7-nothinking/game_3/results.jsonl",
+    "source_line": 5,
+    "source_sha256": "a8c1667c2456b4bdee98ea3adc6e111b2969f8f267ca2a3a3da2285f6a71af5d",
+    "key": "4:L4_preference:北境猎户:行事路线倾向",
+    "question": {
+      "qid": null,
+      "line": "L4_preference",
+      "capability": "L4_preference",
+      "entity": "北境猎户",
+      "field": "行事路线倾向",
+      "question": "北境猎户在12期行事路线倾向记录中，整体上更倾向于哪一种？",
+      "gt": "中立",
+      "aux": {
+        "options": [
+          "正义",
+          "中立",
+          "谋略",
+          "暴力"
+        ],
+        "n_total": 12,
+        "n_pref": 7,
+        "n_runner": 2,
+        "latest": "谋略",
+        "ans_kind": "text"
+      },
+      "strict_scoring": null
+    },
+    "pred": "根据各期档案记录，北境猎户在12期（周期0至11）的行事路线倾向变化为：中立、正义、中立、中立、中立、中立、正义、暴力、中立、谋略、谋略（第11期起其他字段停统，仅保留该倾向）。整体首末净方向为从「中立」到「谋略」，净变化未反转。\n\n答案：谋略",
+    "historic_correct": true,
+    "expected_correct": false
+  },
+  {
+    "source": "output/harness_validation_20260916T0235/runs/glm-4.7-nothinking/game_3/results.jsonl",
+    "source_line": 7,
+    "source_sha256": "a8c1667c2456b4bdee98ea3adc6e111b2969f8f267ca2a3a3da2285f6a71af5d",
+    "key": "6:L4_preference:流浪剑客:行事路线倾向",
+    "question": {
+      "qid": null,
+      "line": "L4_preference",
+      "capability": "L4_preference",
+      "entity": "流浪剑客",
+      "field": "行事路线倾向",
+      "question": "流浪剑客在12期行事路线倾向的记录中，整体上更倾向于哪一种？",
+      "gt": "暴力",
+      "aux": {
+        "options": [
+          "正义",
+          "中立",
+          "谋略",
+          "暴力"
+        ],
+        "n_total": 12,
+        "n_pref": 7,
+        "n_runner": 2,
+        "latest": "谋略",
+        "ans_kind": "text"
+      },
+      "strict_scoring": null
+    },
+    "pred": "根据题目的【整体趋势】规则（首末净方向），流浪剑客在0期至12期中的行事路线倾向变化如下：\n- 0期：中立\n- 1期：暴力\n- 2期：暴力\n- 3期：中立\n- 4期：暴力\n- 5期：正义\n- 6期：暴力\n- 7期：正义\n- 8期：暴力\n- 9期：暴力\n- 10期：正义\n- 11期：谋略（停统前的最后有效值）\n\n首期（0期）为「中立」，末期（11期，最后有效记录）为「谋略」，两者不是同一种倾向，无法直接判断净方向。且「暴力」在中间反复出现，没有形成单一主导的净方向。\n\n因此答案为：无法判断",
+    "historic_correct": true,
+    "expected_correct": false
+  }
+]

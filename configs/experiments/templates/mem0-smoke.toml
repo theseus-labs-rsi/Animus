@@ -1,0 +1,51 @@
+schema_version = 2
+experiment_id = "memory-mem0-office-smoke"
+track = "memory"
+output_root = "output/eval"
+
+[answering_model]
+label = "deepseek-v4-flash"
+model_id = "deepseek-v4-flash"
+endpoint_profile = "DEEPSEEK"
+
+# 离线测试夹具。正式运行时改为生成产物路径。
+[[benchmarks]]
+path = "tests/harness/fixtures/office__20260902-121616"
+corpus_variant = "filtered"
+allow_unmet = true
+
+[[targets]]
+id = "mem0-oss"
+system = "memory.mem0-oss"
+
+[targets.memory_config]
+top_k = 3
+namespace_prefix = "mem0_eval"
+
+[targets.memory_config.internal_model]
+model_id = "deepseek-v4-flash"
+endpoint_profile = "DEEPSEEK"
+
+[targets.memory_config.embedder]
+provider = "huggingface"
+model_id = "BAAI/bge-small-zh-v1.5"
+
+[targets.memory_config.vector_store]
+provider = "qdrant"
+host = "127.0.0.1"
+port = 6333
+service_version = "1.19.1"
+
+[protocol]
+version = "memory-track-mem0-smoke-v1"
+answering_model_policy = "fixed"
+filler_policy = "as_provided"
+context_token_budget = 0
+witness_policy = "recorded_not_enforced"
+scoring = "disabled_for_chain_smoke"
+
+[execution]
+mode = "smoke"
+limit = 6
+seed = 0
+questions_in_parallel = 1

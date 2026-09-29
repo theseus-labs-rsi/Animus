@@ -1,0 +1,5 @@
+# Optional Memory System Track integration. Keep out of requirements-minimal.txt
+# so native/builtin harness users do not inherit Mem0's storage dependencies.
+mem0ai==2.0.7
+qdrant-client==1.18.0
+sentence-transformers==6.1.0

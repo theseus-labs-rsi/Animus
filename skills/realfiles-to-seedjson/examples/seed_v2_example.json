@@ -1,0 +1,377 @@
+{
+  "schema_version": 2,
+  "seed_id": "synthetic_report_revision_v2",
+  "family": "synthetic_reporting",
+  "title": "合成报告修订种子接口示例",
+  "description": "完全合成的 seed JSON 格式示例。",
+  "sources": [
+    {
+      "id": "design",
+      "path": "design.txt",
+      "sha256": "a9b8514b89a24b5095d319c62672cf6c2328b33d08877d8765711b2c1111a981",
+      "role": "builder_only",
+      "source_kind": "task_specification",
+      "title": "合成演示资料 design.txt"
+    },
+    {
+      "id": "public",
+      "path": "public.txt",
+      "sha256": "487d364a09d230debffb99c74c85e41a57e30fa5274a1d30d03c1770ebc25ff6",
+      "role": "corpus",
+      "source_kind": "factual_record",
+      "date_scope": {
+        "reporting_period": "2025Q4",
+        "published": "2026-01-01"
+      },
+      "allowed_use": [
+        "mechanism",
+        "exemplar_style"
+      ],
+      "sensitivity": "public",
+      "title": "合成演示资料 public.txt"
+    },
+    {
+      "id": "judge",
+      "path": "audit.txt",
+      "sha256": "868cb4c2b0976437265d9928034708265979908bc8608ae2ef680d1f4cdc7534",
+      "role": "evaluator_only",
+      "title": "合成演示资料 audit.txt",
+      "source_kind": "factual_record"
+    }
+  ],
+  "task": {
+    "objective": "更新工作底稿",
+    "instructions": [
+      "依据正式修订重算指标，并保留来源。"
+    ],
+    "forbidden_inferences": [
+      "缺失值不得自动记零"
+    ]
+  },
+  "mechanisms": [
+    {
+      "id": "version_chain",
+      "description": "修订导致重算。",
+      "source_refs": [
+        {
+          "source_id": "design",
+          "locator": "版本依赖节"
+        }
+      ],
+      "required_entity_types": [
+        "report",
+        "metric"
+      ],
+      "required_relation_types": [
+        "uses"
+      ],
+      "required_event_types": [
+        "revise",
+        "recompute"
+      ],
+      "required_causal_rules": [
+        "refresh"
+      ],
+      "failure_modes": [
+        "沿用旧版测算"
+      ],
+      "capability_hooks": [
+        "L3_process"
+      ]
+    }
+  ],
+  "exemplars": [
+    {
+      "title": "合成修订说明",
+      "content": "正式修订到达，重新核算指标。",
+      "doc_type": "工作记录",
+      "date": "2026-01-01",
+      "origin": "synthetic",
+      "source_refs": [],
+      "mechanism_refs": [
+        "version_chain"
+      ]
+    }
+  ],
+  "blueprint_requirements": {
+    "entity_types": [
+      {
+        "id": "report",
+        "noun": "报告",
+        "count": 2,
+        "primary": true,
+        "fields": [
+          {
+            "name": "version",
+            "kind": "status",
+            "allowed_values": [
+              "初版",
+              "修订版"
+            ],
+            "evolving": true,
+            "source_refs": [
+              {
+                "source_id": "design",
+                "locator": "修订程序"
+              }
+            ]
+          }
+        ],
+        "source_refs": [
+          {
+            "source_id": "design",
+            "locator": "section:修订程序"
+          }
+        ]
+      },
+      {
+        "id": "metric",
+        "noun": "指标",
+        "count": 2,
+        "fields": [
+          {
+            "name": "adopted_report",
+            "kind": "reference",
+            "source_refs": [
+              {
+                "source_id": "design",
+                "locator": "section:修订程序"
+              }
+            ]
+          },
+          {
+            "name": "amount",
+            "kind": "numeric",
+            "unit": "万元",
+            "range": [
+              0,
+              1000
+            ],
+            "source_refs": [
+              {
+                "source_id": "design",
+                "locator": "section:修订程序"
+              }
+            ]
+          }
+        ],
+        "source_refs": [
+          {
+            "source_id": "design",
+            "locator": "section:修订程序"
+          }
+        ]
+      }
+    ],
+    "relation_types": [
+      {
+        "id": "uses",
+        "from_type": "metric",
+        "to_type": "report",
+        "field": "adopted_report",
+        "temporal": true,
+        "min_count": 1,
+        "source_refs": [
+          {
+            "source_id": "design",
+            "locator": "section:修订程序"
+          }
+        ]
+      }
+    ],
+    "event_types": [
+      {
+        "id": "revise",
+        "label": "修订报告",
+        "roles": {
+          "report": "report",
+          "metric": "metric"
+        },
+        "effect_fields": [
+          {
+            "role": "report",
+            "field": "version"
+          }
+        ],
+        "min_count": 1,
+        "relation_bindings": [
+          {
+            "relation": "uses",
+            "from_role": "metric",
+            "to_role": "report"
+          }
+        ],
+        "source_refs": [
+          {
+            "source_id": "design",
+            "locator": "section:修订程序"
+          }
+        ]
+      },
+      {
+        "id": "recompute",
+        "label": "重算指标",
+        "roles": {
+          "report": "report",
+          "metric": "metric"
+        },
+        "effect_fields": [
+          {
+            "role": "metric",
+            "field": "amount"
+          }
+        ],
+        "min_count": 1,
+        "relation_bindings": [
+          {
+            "relation": "uses",
+            "from_role": "metric",
+            "to_role": "report"
+          }
+        ],
+        "source_refs": [
+          {
+            "source_id": "design",
+            "locator": "section:修订程序"
+          }
+        ]
+      }
+    ],
+    "causal_rules": [
+      {
+        "id": "refresh",
+        "trigger_event": "revise",
+        "effect_event": "recompute",
+        "delay_sessions": 1,
+        "shared_roles": [
+          "report",
+          "metric"
+        ],
+        "basis": "间隔一个 session 为合成设计",
+        "status": "synthetic_design",
+        "source_refs": [
+          {
+            "source_id": "design",
+            "locator": "修订程序"
+          }
+        ]
+      }
+    ],
+    "evidence_channels": [
+      "报告",
+      "工作记录"
+    ],
+    "temporal_model": {
+      "min_sessions": 4
+    },
+    "state_machines": [
+      {
+        "id": "version_progression",
+        "entity_type": "report",
+        "field": "version",
+        "states": [
+          "初版",
+          "修订版"
+        ],
+        "allowed_transitions": [
+          [
+            "初版",
+            "修订版"
+          ]
+        ],
+        "source_refs": [
+          {
+            "source_id": "design",
+            "locator": "修订程序"
+          }
+        ],
+        "conditions": [
+          "正式修订已到达"
+        ]
+      }
+    ],
+    "metric_definitions": [
+      {
+        "name": "amount",
+        "entity_type": "metric",
+        "kind": "numeric",
+        "unit": "万元",
+        "definition": "报告期内采用的测算值",
+        "period_basis": "季度",
+        "comparators": [
+          "上年同期"
+        ],
+        "source_refs": [
+          {
+            "source_id": "design",
+            "locator": "修订程序"
+          }
+        ]
+      }
+    ]
+  },
+  "generation_contract": {
+    "must_distinguish": [
+      "报告期与发布日期"
+    ],
+    "conditional_requirements": [
+      {
+        "text": "修订到达后重算",
+        "status": "conditional",
+        "conditions": [
+          "正式修订到达"
+        ],
+        "source_refs": [
+          {
+            "source_id": "design",
+            "locator": "修订程序"
+          }
+        ]
+      }
+    ],
+    "unresolved": [],
+    "synthetic_designs": [
+      {
+        "text": "使用合成机构名称",
+        "status": "synthetic_design",
+        "source_refs": []
+      }
+    ],
+    "syntheticization": {
+      "names": "replace",
+      "dates": "shift_or_generate"
+    }
+  },
+  "document_map": [
+    {
+      "source_id": "public",
+      "segments": [
+        {
+          "locator": "line:2-3",
+          "topic": "报告与工作记录体裁",
+          "contributes": [
+            "exemplar_style"
+          ]
+        }
+      ]
+    },
+    {
+      "source_id": "judge",
+      "segments": [
+        {
+          "locator": "line:2",
+          "topic": "抽取覆盖审计，仅保留在审查记录"
+        }
+      ]
+    }
+  ],
+  "review": {
+    "blocking_issues": [],
+    "quality_status": "reviewed",
+    "notes": "完全合成的接口演示；没有执行 LLM 抽取或生成实验。",
+    "coverage": {
+      "sources_reviewed": 3,
+      "sources_used": 2
+    }
+  }
+}

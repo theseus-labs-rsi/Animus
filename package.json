@@ -1,0 +1,13 @@
+{
+  "name": "animus",
+  "private": true,
+  "description": "Pinned CLI versions for Animus evaluation.",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.260",
+    "@deepseek-ai/dsh": "0.1.2-rc.1",
+    "@openai/codex": "0.153.2"
+  }
+}

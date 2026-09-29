@@ -1,0 +1,197 @@
+{
+  "overall": {
+    "n": 49,
+    "grounded": 40,
+    "survival": 0.816
+  },
+  "by_line": {
+    "L10_admission": {
+      "n": 6,
+      "grounded": 5,
+      "survival": 0.833
+    },
+    "L1_timeline": {
+      "n": 6,
+      "grounded": 6,
+      "survival": 1.0
+    },
+    "L2_relational": {
+      "n": 3,
+      "grounded": 2,
+      "survival": 0.667
+    },
+    "L3_process": {
+      "n": 10,
+      "grounded": 9,
+      "survival": 0.9
+    },
+    "L4_preference": {
+      "n": 5,
+      "grounded": 2,
+      "survival": 0.4
+    },
+    "L5_conflict": {
+      "n": 4,
+      "grounded": 3,
+      "survival": 0.75
+    },
+    "L6_refusal": {
+      "n": 7,
+      "grounded": 5,
+      "survival": 0.714
+    },
+    "L7_consolidation": {
+      "n": 7,
+      "grounded": 7,
+      "survival": 1.0
+    },
+    "L9_induction": {
+      "n": 1,
+      "grounded": 1,
+      "survival": 1.0
+    }
+  },
+  "by_capability": {
+    "FORGET": {
+      "n": 1,
+      "grounded": 1,
+      "survival": 1.0
+    },
+    "IE": {
+      "n": 1,
+      "grounded": 1,
+      "survival": 1.0
+    },
+    "KU": {
+      "n": 1,
+      "grounded": 1,
+      "survival": 1.0
+    },
+    "L10_admission": {
+      "n": 3,
+      "grounded": 3,
+      "survival": 1.0
+    },
+    "L10_witness": {
+      "n": 3,
+      "grounded": 2,
+      "survival": 0.667
+    },
+    "L2_multihop": {
+      "n": 3,
+      "grounded": 2,
+      "survival": 0.667
+    },
+    "L3_order": {
+      "n": 10,
+      "grounded": 9,
+      "survival": 0.9
+    },
+    "L4_preference": {
+      "n": 5,
+      "grounded": 2,
+      "survival": 0.4
+    },
+    "L5_conflict": {
+      "n": 4,
+      "grounded": 3,
+      "survival": 0.75
+    },
+    "L6_refusal": {
+      "n": 7,
+      "grounded": 5,
+      "survival": 0.714
+    },
+    "L7_consolidation": {
+      "n": 7,
+      "grounded": 7,
+      "survival": 1.0
+    },
+    "L9_induction": {
+      "n": 1,
+      "grounded": 1,
+      "survival": 1.0
+    },
+    "MR": {
+      "n": 1,
+      "grounded": 1,
+      "survival": 1.0
+    },
+    "PREEXPIRE": {
+      "n": 1,
+      "grounded": 1,
+      "survival": 1.0
+    },
+    "TR": {
+      "n": 1,
+      "grounded": 1,
+      "survival": 1.0
+    }
+  },
+  "n_dropped": 9,
+  "drops": [
+    {
+      "line": "L2_relational",
+      "capability": "L2_multihop",
+      "entity": "马丽",
+      "field": "汇报对象·直属上级→汇报对象·直属上级→工位编号",
+      "reason": "末值 'B1-5923' 未就近桥实体「黄忠」(别名悬空/未渲)"
+    },
+    {
+      "line": "L3_process",
+      "capability": "L3_order",
+      "entity": "企业服务部",
+      "field": "",
+      "reason": "事件「SLA=99.1%」@s3 未就近「企业服务部」(幽灵/未渲)"
+    },
+    {
+      "line": "L4_preference",
+      "capability": "L4_preference",
+      "entity": "云计算事业部",
+      "field": "周报汇报形式倾向",
+      "reason": "偏好「书面文档」仅 4 周就近「云计算事业部」(<5,证据不足以聚合)"
+    },
+    {
+      "line": "L4_preference",
+      "capability": "L4_preference",
+      "entity": "智能客服部",
+      "field": "周报汇报形式倾向",
+      "reason": "偏好「线下会议」仅 4 周就近「智能客服部」(<5,证据不足以聚合)"
+    },
+    {
+      "line": "L4_preference",
+      "capability": "L4_preference",
+      "entity": "数据平台",
+      "field": "周报汇报形式倾向",
+      "reason": "偏好「书面文档」仅 4 周就近「数据平台」(<5,证据不足以聚合)"
+    },
+    {
+      "line": "L5_conflict",
+      "capability": "L5_conflict",
+      "entity": "业务支撑部",
+      "field": "汇报对象",
+      "reason": "权威值'陈总'未就近「业务支撑部」(信号文档)"
+    },
+    {
+      "line": "L6_refusal",
+      "capability": "L6_refusal",
+      "entity": "许静",
+      "field": "P0缺陷率",
+      "reason": "假拒答:目标字段名「P0缺陷率」就近「许静」(E 其实有该字段)"
+    },
+    {
+      "line": "L6_refusal",
+      "capability": "L6_refusal",
+      "entity": "黄磊",
+      "field": "周报汇报形式倾向",
+      "reason": "假拒答:目标字段名「周报汇报形式倾向」就近「黄磊」(E 其实有该字段)"
+    },
+    {
+      "line": "L10_admission",
+      "capability": "L10_witness",
+      "entity": "AI工程",
+      "field": "工位编号",
+      "reason": "见证 Y 未就近「AI工程」"
+    }
+  ]
+}

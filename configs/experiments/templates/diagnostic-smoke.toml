@@ -1,0 +1,25 @@
+schema_version = 2
+experiment_id = "diagnostic-office-smoke"
+track = "native"
+output_root = "output/eval"
+
+# 离线测试夹具。正式运行时改为生成产物路径。
+[[benchmarks]]
+path = "tests/harness/fixtures/office__20260902-121616"
+corpus_variant = "filtered"
+allow_unmet = true
+
+[[targets]]
+id = "builtin-diagnostic"
+system = "diagnostic.builtin"
+
+[protocol]
+version = "diagnostic-v1"
+network_mode = "closed"
+filler_policy = "as_provided"
+note = "内置离线控制面测试，不产生正式分数。"
+
+[execution]
+mode = "smoke"
+limit = 2
+seed = 0

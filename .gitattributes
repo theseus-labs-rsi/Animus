@@ -1,0 +1,2 @@
+# Keep the public synthetic source fixtures consistent with their SHA256 values.
+skills/realfiles-to-seedjson/examples/source_workspace/*.txt text eol=lf

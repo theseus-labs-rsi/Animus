@@ -1,0 +1,386 @@
+{
+  "run_id": "office__20260904-121616",
+  "scenario": "office",
+  "tag": "min-smoke",
+  "created": "2026-09-04T12:16:16",
+  "status": "done",
+  "config": {
+    "from": null,
+    "to": null,
+    "only": null,
+    "target_tokens": 100000,
+    "quotas": {
+      "L1_timeline": 6,
+      "L2_relational": 5,
+      "L3_process": 10,
+      "L4_preference": 5,
+      "L5_conflict": 4,
+      "L6_refusal": 7,
+      "L7_consolidation": 7,
+      "L8_transition": 3,
+      "L9_induction": 5,
+      "L10_admission": 7
+    }
+  },
+  "stages": {
+    "input": {
+      "started_ts": 1788495376.4443567,
+      "done": true,
+      "ts": "12:16:16",
+      "elapsed_s": 0.0,
+      "artifact": "00_input.json"
+    },
+    "whitepaper": {
+      "started_ts": 1788495376.4451609,
+      "done": true,
+      "ts": "12:16:53",
+      "elapsed_s": 37.3,
+      "artifact": "01_whitepaper.json"
+    },
+    "world": {
+      "started_ts": 1788495629.6819072,
+      "done": true,
+      "ts": "12:24:52",
+      "elapsed_s": 262.6,
+      "artifact": "02_world.json"
+    },
+    "orders": {
+      "started_ts": 1788495892.263802,
+      "done": true,
+      "ts": "12:24:52",
+      "elapsed_s": 0.1,
+      "artifact": "03_orders.json"
+    },
+    "well_posed": {
+      "started_ts": 1788495892.3329647,
+      "done": true,
+      "ts": "12:24:52",
+      "elapsed_s": 0.0,
+      "artifact": "03_well_posed_report.json"
+    },
+    "questions": {
+      "started_ts": 1788495892.3558753,
+      "done": true,
+      "ts": "12:25:04",
+      "elapsed_s": 11.7,
+      "artifact": "04_questions.json"
+    },
+    "corpus": {
+      "started_ts": 1788495904.0693753,
+      "done": true,
+      "ts": "12:44:29",
+      "elapsed_s": 1165.8,
+      "artifact": "05_corpus.json"
+    },
+    "grounding": {
+      "started_ts": 1788497069.9194558,
+      "done": true,
+      "ts": "12:44:32",
+      "elapsed_s": 2.6,
+      "artifact": "06_grounded_questions.json"
+    }
+  },
+  "algo": {
+    "active_lines": [
+      "L1_timeline",
+      "L2_relational",
+      "L3_process",
+      "L4_preference",
+      "L5_conflict",
+      "L6_refusal",
+      "L7_consolidation",
+      "L8_transition",
+      "L9_induction",
+      "L10_admission"
+    ],
+    "medium": null,
+    "entities": 72,
+    "sessions": 8,
+    "orders": 51,
+    "orders_by_line": {
+      "L1_timeline": 6,
+      "L2_relational": 5,
+      "L3_process": 10,
+      "L4_preference": 5,
+      "L5_conflict": 4,
+      "L6_refusal": 7,
+      "L7_consolidation": 7,
+      "L9_induction": 1,
+      "L10_admission": 6
+    },
+    "well_posed": {
+      "overall": {
+        "n": 51,
+        "well_posed": 49,
+        "pass_rate": 0.961
+      },
+      "by_line": {
+        "L10_admission": {
+          "n": 6,
+          "well_posed": 6,
+          "pass_rate": 1.0
+        },
+        "L1_timeline": {
+          "n": 6,
+          "well_posed": 6,
+          "pass_rate": 1.0
+        },
+        "L2_relational": {
+          "n": 5,
+          "well_posed": 3,
+          "pass_rate": 0.6
+        },
+        "L3_process": {
+          "n": 10,
+          "well_posed": 10,
+          "pass_rate": 1.0
+        },
+        "L4_preference": {
+          "n": 5,
+          "well_posed": 5,
+          "pass_rate": 1.0
+        },
+        "L5_conflict": {
+          "n": 4,
+          "well_posed": 4,
+          "pass_rate": 1.0
+        },
+        "L6_refusal": {
+          "n": 7,
+          "well_posed": 7,
+          "pass_rate": 1.0
+        },
+        "L7_consolidation": {
+          "n": 7,
+          "well_posed": 7,
+          "pass_rate": 1.0
+        },
+        "L9_induction": {
+          "n": 1,
+          "well_posed": 1,
+          "pass_rate": 1.0
+        }
+      },
+      "n_dropped": 2
+    },
+    "questions": 49,
+    "docs": 317,
+    "chars": 103126,
+    "diversity": {
+      "n_docs": 317,
+      "NDG_n-gram多样性(越高越好)": {
+        "point": 1.0878,
+        "ci": [
+          1.1299,
+          1.1858
+        ]
+      },
+      "IDO_跨文档重叠(越低越好)": {
+        "point": 0.4763,
+        "ci": [
+          0.4392,
+          0.463
+        ]
+      },
+      "CR_gzip压缩比(越低越好)": {
+        "point": 3.1732,
+        "ci": [
+          2.9949,
+          3.0863
+        ]
+      }
+    },
+    "grounding": {
+      "overall": {
+        "n": 49,
+        "grounded": 40,
+        "survival": 0.816
+      },
+      "by_line": {
+        "L10_admission": {
+          "n": 6,
+          "grounded": 5,
+          "survival": 0.833
+        },
+        "L1_timeline": {
+          "n": 6,
+          "grounded": 6,
+          "survival": 1.0
+        },
+        "L2_relational": {
+          "n": 3,
+          "grounded": 2,
+          "survival": 0.667
+        },
+        "L3_process": {
+          "n": 10,
+          "grounded": 9,
+          "survival": 0.9
+        },
+        "L4_preference": {
+          "n": 5,
+          "grounded": 2,
+          "survival": 0.4
+        },
+        "L5_conflict": {
+          "n": 4,
+          "grounded": 3,
+          "survival": 0.75
+        },
+        "L6_refusal": {
+          "n": 7,
+          "grounded": 5,
+          "survival": 0.714
+        },
+        "L7_consolidation": {
+          "n": 7,
+          "grounded": 7,
+          "survival": 1.0
+        },
+        "L9_induction": {
+          "n": 1,
+          "grounded": 1,
+          "survival": 1.0
+        }
+      },
+      "by_capability": {
+        "FORGET": {
+          "n": 1,
+          "grounded": 1,
+          "survival": 1.0
+        },
+        "IE": {
+          "n": 1,
+          "grounded": 1,
+          "survival": 1.0
+        },
+        "KU": {
+          "n": 1,
+          "grounded": 1,
+          "survival": 1.0
+        },
+        "L10_admission": {
+          "n": 3,
+          "grounded": 3,
+          "survival": 1.0
+        },
+        "L10_witness": {
+          "n": 3,
+          "grounded": 2,
+          "survival": 0.667
+        },
+        "L2_multihop": {
+          "n": 3,
+          "grounded": 2,
+          "survival": 0.667
+        },
+        "L3_order": {
+          "n": 10,
+          "grounded": 9,
+          "survival": 0.9
+        },
+        "L4_preference": {
+          "n": 5,
+          "grounded": 2,
+          "survival": 0.4
+        },
+        "L5_conflict": {
+          "n": 4,
+          "grounded": 3,
+          "survival": 0.75
+        },
+        "L6_refusal": {
+          "n": 7,
+          "grounded": 5,
+          "survival": 0.714
+        },
+        "L7_consolidation": {
+          "n": 7,
+          "grounded": 7,
+          "survival": 1.0
+        },
+        "L9_induction": {
+          "n": 1,
+          "grounded": 1,
+          "survival": 1.0
+        },
+        "MR": {
+          "n": 1,
+          "grounded": 1,
+          "survival": 1.0
+        },
+        "PREEXPIRE": {
+          "n": 1,
+          "grounded": 1,
+          "survival": 1.0
+        },
+        "TR": {
+          "n": 1,
+          "grounded": 1,
+          "survival": 1.0
+        }
+      },
+      "n_dropped": 9
+    },
+    "targetspec": {
+      "min_questions": 24,
+      "per_line_min": {
+        "L1_timeline": 3,
+        "L2_relational": 3,
+        "L3_process": 3,
+        "L4_preference": 2,
+        "L5_conflict": 2,
+        "L6_refusal": 3,
+        "L7_consolidation": 3,
+        "L8_transition": 1,
+        "L9_induction": 2,
+        "L10_admission": 3
+      },
+      "haystack_ratio": 4.0
+    },
+    "per_line_final": {
+      "L1_timeline": 6,
+      "L2_relational": 2,
+      "L3_process": 9,
+      "L4_preference": 2,
+      "L5_conflict": 3,
+      "L6_refusal": 5,
+      "L7_consolidation": 7,
+      "L8_transition": 0,
+      "L9_induction": 1,
+      "L10_admission": 5
+    },
+    "met_status": "UNMET: ['L2_relational:2/3', 'L9_induction:1/2', 'L8_transition:0/1']"
+  },
+  "llm_calls": 4140,
+  "env": {
+    "model": "deepseek-v4-flash",
+    "llm_concurrency": 8,
+    "base_url": "https://www.dmxapi.cn/v1"
+  },
+  "current_stage": "",
+  "validated": {
+    "source_run": "office__20260902-121616",
+    "filter": "drop is_filler=True; keep signal/conflict/sensitive/rule",
+    "counts_all": {
+      "signal": 205,
+      "filler": 96,
+      "conflict": 4,
+      "sensitive": 3,
+      "rule": 9
+    },
+    "n_all": 317,
+    "n_valid": 221,
+    "n_chars": 82834,
+    "questions": 40,
+    "grounding_recheck": {
+      "n": 40,
+      "grounded": 40,
+      "survival": 1.0
+    },
+    "lost_after_slim": [],
+    "scenario": "office",
+    "tag": "min-smoke",
+    "met_status": "UNMET: ['L2_relational:2/3', 'L9_induction:1/2', 'L8_transition:0/1']"
+  }
+}

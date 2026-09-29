@@ -1,0 +1,42 @@
+# Python and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv*/
+
+# Credentials and local configuration
+.env
+# Local provider credentials
+configs/env/*.env
+
+# Generated runs, logs and local research material
+output/
+*.log
+legacy/
+refs/
+reports/
+survey/
+docs/
+reference_materials/
+*.pdf
+
+# Local handoff notes retained outside the published repository
+/GPU_CONTEXT.md
+/README_LOCAL.md
+/SEED_INTEGRATION_EVALUATION.md
+/SEED_PIPELINE_DESIGN.md
+/examples/agent_pipeline/
+
+# Raw data and private reporting material
+/seeds/
+/data/real_seed/
+recall_logs.zip
+*.crdownload
+request&respone*.csv
+海尔*.xlsx
+73汇报/
+Ryan
+
+# Editors and operating systems
+.DS_Store
+.idea/

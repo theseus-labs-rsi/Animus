@@ -1,0 +1,1661 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:memory-bench-factory:seed-pack:v2",
+  "title": "Memory benchmark seed pack v2",
+  "description": "Shape contract. pipeline.seed_pack additionally validates finite JSON, unique identities, reference closure, source permissions, date validity, blueprint executability, statement conditions, and contract digests. review.blocking_issues gates generation, not archive validation.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "seed_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "family": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/source"
+      },
+      "minItems": 1
+    },
+    "task": {
+      "type": "object",
+      "properties": {
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "instructions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "forbidden_inferences": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        }
+      },
+      "required": [
+        "objective",
+        "instructions"
+      ],
+      "additionalProperties": false
+    },
+    "exemplars": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/exemplar"
+      }
+    },
+    "mechanisms": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/mechanism"
+      },
+      "minItems": 1
+    },
+    "blueprint_requirements": {
+      "type": "object",
+      "properties": {
+        "entity_types": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/entity"
+          },
+          "minItems": 1
+        },
+        "relation_types": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/relation"
+          }
+        },
+        "event_types": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event"
+          }
+        },
+        "causal_rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/causal"
+          }
+        },
+        "evidence_channels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "temporal_model": {
+          "$ref": "#/$defs/temporal"
+        },
+        "state_machines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/state_machine"
+          }
+        },
+        "metric_definitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/metric"
+          }
+        }
+      },
+      "required": [
+        "entity_types",
+        "relation_types",
+        "event_types",
+        "causal_rules",
+        "evidence_channels",
+        "temporal_model"
+      ],
+      "additionalProperties": false
+    },
+    "document_map": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "locator": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                }
+              },
+              "required": [
+                "locator"
+              ],
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "source_id",
+          "segments"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "generation_contract": {
+      "type": "object",
+      "properties": {
+        "syntheticization": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          }
+        },
+        "must_include": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/claim"
+          }
+        },
+        "must_distinguish": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/claim"
+          }
+        },
+        "must_not_infer": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/claim"
+          }
+        },
+        "sensitive_fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/claim"
+          }
+        },
+        "active_lines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/claim"
+          }
+        },
+        "traps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/claim"
+          }
+        },
+        "conditional_requirements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/claim"
+          }
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/claim"
+          }
+        },
+        "synthetic_designs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/claim"
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "review": {
+      "type": "object",
+      "properties": {
+        "blocking_issues": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": true
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$"
+    },
+    "contract_digest": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "seed_id",
+    "family",
+    "title",
+    "description",
+    "sources",
+    "task",
+    "exemplars",
+    "mechanisms",
+    "blueprint_requirements",
+    "generation_contract"
+  ],
+  "additionalProperties": false,
+  "dependentRequired": {
+    "digest": [
+      "contract_digest"
+    ],
+    "contract_digest": [
+      "digest"
+    ]
+  },
+  "$defs": {
+    "source_ref": {
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        }
+      },
+      "required": [
+        "source_id",
+        "locator"
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-fA-F0-9]{64}$"
+        },
+        "role": {
+          "enum": [
+            "corpus",
+            "builder_only",
+            "evaluator_only"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "source_kind": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "date_scope": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          }
+        },
+        "allowed_use": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "sensitivity": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "sha256",
+        "role",
+        "source_kind"
+      ],
+      "additionalProperties": false
+    },
+    "field": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "monotonic": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "range": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "conditional",
+            "unresolved",
+            "synthetic_design"
+          ]
+        },
+        "allowed_values": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "evolving": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "conditional"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "conditions"
+            ],
+            "properties": {
+              "conditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                },
+                "uniqueItems": true,
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "entity": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "noun": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "primary": {
+          "type": "boolean"
+        },
+        "cardinality_policy": {
+          "const": "exact"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/field"
+          }
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "conditional",
+            "unresolved",
+            "synthetic_design"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "fields"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "conditional"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "conditions"
+            ],
+            "properties": {
+              "conditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                },
+                "uniqueItems": true,
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "cardinality_policy"
+            ]
+          },
+          "then": {
+            "required": [
+              "count"
+            ]
+          }
+        }
+      ]
+    },
+    "relation": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "from_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "to_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "temporal": {
+          "type": "boolean"
+        },
+        "min_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "conditional",
+            "unresolved",
+            "synthetic_design"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "from_type",
+        "to_type",
+        "field",
+        "temporal",
+        "min_count"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "conditional"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "conditions"
+            ],
+            "properties": {
+              "conditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                },
+                "uniqueItems": true,
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "event": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "roles": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          }
+        },
+        "effect_fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+              },
+              "field": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+              }
+            },
+            "required": [
+              "role",
+              "field"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        "min_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "relation_bindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "relation": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+              },
+              "from_role": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+              },
+              "to_role": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+              }
+            },
+            "required": [
+              "relation",
+              "from_role",
+              "to_role"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "conditional",
+            "unresolved",
+            "synthetic_design"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "roles",
+        "effect_fields",
+        "min_count"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "conditional"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "conditions"
+            ],
+            "properties": {
+              "conditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                },
+                "uniqueItems": true,
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "causal": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "trigger_event": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "effect_event": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "delay_sessions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "shared_roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "conditional",
+            "unresolved",
+            "synthetic_design"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "trigger_event",
+        "effect_event",
+        "delay_sessions"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "conditional"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "conditions"
+            ],
+            "properties": {
+              "conditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                },
+                "uniqueItems": true,
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "state_machine": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "entity_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "allowed_transitions": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+            },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "conditional",
+            "unresolved",
+            "synthetic_design"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "field",
+        "states",
+        "allowed_transitions",
+        "source_refs"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "conditional"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "conditions"
+            ],
+            "properties": {
+              "conditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                },
+                "uniqueItems": true,
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "metric": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "definition": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "period_basis": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "comparators": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "entity_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "formula": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "conditional",
+            "unresolved",
+            "synthetic_design"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "unit",
+        "definition",
+        "period_basis",
+        "comparators",
+        "source_refs"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "conditional"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "conditions"
+            ],
+            "properties": {
+              "conditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                },
+                "uniqueItems": true,
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "temporal": {
+      "type": "object",
+      "properties": {
+        "min_sessions": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "time_granularity": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "reporting_period": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "event_spacing": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "allow_retrospective": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        }
+      },
+      "required": [
+        "min_sessions"
+      ],
+      "additionalProperties": false
+    },
+    "claim": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+            },
+            "source_refs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/source_ref"
+              }
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+            },
+            "conditions": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+              },
+              "uniqueItems": true
+            },
+            "basis": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+            },
+            "status": {
+              "enum": [
+                "accepted",
+                "conditional",
+                "unresolved",
+                "synthetic_design"
+              ]
+            }
+          },
+          "required": [
+            "text",
+            "status",
+            "source_refs"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "conditional"
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              },
+              "then": {
+                "required": [
+                  "conditions"
+                ],
+                "properties": {
+                  "conditions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                    },
+                    "uniqueItems": true,
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "mechanism": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          },
+          "minItems": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "conditional",
+            "unresolved",
+            "synthetic_design"
+          ]
+        },
+        "required_entity_types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "required_relation_types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "required_event_types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "required_causal_rules": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "failure_modes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        },
+        "capability_hooks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "source_refs",
+        "required_entity_types",
+        "required_relation_types",
+        "required_event_types",
+        "required_causal_rules"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "conditional"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "conditions"
+            ],
+            "properties": {
+              "conditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                },
+                "uniqueItems": true,
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "required_entity_types": {
+                  "minItems": 1
+                }
+              }
+            },
+            {
+              "properties": {
+                "required_relation_types": {
+                  "minItems": 1
+                }
+              }
+            },
+            {
+              "properties": {
+                "required_event_types": {
+                  "minItems": 1
+                }
+              }
+            },
+            {
+              "properties": {
+                "required_causal_rules": {
+                  "minItems": 1
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "exemplar": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "doc_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        },
+        "date": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "origin": {
+          "enum": [
+            "source",
+            "synthetic"
+          ]
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        },
+        "mechanism_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "title",
+        "content",
+        "doc_type",
+        "date",
+        "origin",
+        "source_refs",
+        "mechanism_refs"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "origin": {
+                "const": "synthetic"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "source_refs": {
+                "maxItems": 0
+              },
+              "mechanism_refs": {
+                "minItems": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "source_refs": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "digest"
+              ]
+            },
+            {
+              "required": [
+                "contract_digest"
+              ]
+            }
+          ]
+        }
+      },
+      "then": {
+        "required": [
+          "document_map",
+          "review"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# Core benchmark generation; optional evaluation integrations use requirements.txt.
+openai==2.43.0
+python-dotenv==1.2.1
+httpx==0.28.1
+json-repair==0.61.0
+
+# agent_harnesses 评测控制面：Python 3.10 需要 tomli 才读得懂 TOML(3.11+ 用内置 tomllib)。
+# 原生 CLI adapter 只调外部 node CLI(见 package.json 的 pin)，不引入 Python 依赖。
+tomli>=2.0; python_version < "3.11"

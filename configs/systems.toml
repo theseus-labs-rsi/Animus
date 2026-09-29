@@ -1,0 +1,132 @@
+schema_version = 2
+note = "Stable harness/memory registry. Models, endpoints, budgets, and smoke limits belong to experiments."
+
+[[systems]]
+schema_version = 2
+id = "diagnostic.builtin"
+track = "native"
+display_name = "Built-in offline control-plane diagnostic"
+status = "diagnostic"
+role = "diagnostic"
+implementation = { runner = "builtin_diagnostic", executable = true }
+spec = { harness = { id = "builtin-diagnostic", version = "repository" }, native_tool_policy = { mode = "none", tools = [], network_mode = "none", filesystem_roots = ["benchmark_files"], subagents_enabled = false } }
+
+[[systems]]
+schema_version = 2
+id = "native.claude-code"
+track = "native"
+display_name = "Claude Code"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "native_cli", adapter = "claude", executable = true }
+spec = { harness = { id = "claude-code", package_pin = "2.1.260", version_source = "runtime_preflight" }, native_tool_policy = { mode = "native", network_mode = "closed", filesystem_roots = ["benchmark_workspace"], server_side_tools = [], subagents_enabled = false } }
+
+[[systems]]
+schema_version = 2
+id = "native.codex"
+track = "native"
+display_name = "Codex"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "native_cli", adapter = "codex", executable = true }
+spec = { harness = { id = "codex", package_pin = "0.153.2", version_source = "runtime_preflight" }, native_tool_policy = { mode = "native", network_mode = "closed", filesystem_roots = ["benchmark_workspace"], server_side_tools = [], subagents_enabled = false } }
+
+[[systems]]
+schema_version = 2
+id = "native.dsh"
+track = "native"
+display_name = "DeepSeek Harness"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "native_cli", adapter = "dsh", executable = true }
+spec = { harness = { id = "dsh", package_pin = "0.1.2-rc.1", version_source = "runtime_preflight" }, native_tool_policy = { mode = "native", network_mode = "closed", filesystem_roots = ["benchmark_workspace"], server_side_tools = [], subagents_enabled = false } }
+
+[[systems]]
+schema_version = 2
+id = "native.gemini-cli"
+track = "native"
+display_name = "Gemini CLI"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "planned", adapter = "gemini", executable = false }
+spec = { harness = { id = "gemini-cli", version = "TBD" }, native_tool_policy = { mode = "native", network_mode = "TBD", filesystem_roots = ["benchmark_workspace"], server_side_tools = "TBD", subagents_enabled = "TBD" } }
+
+[[systems]]
+schema_version = 2
+id = "native.qwen-code"
+track = "native"
+display_name = "Qwen Code"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "planned", adapter = "qwen", executable = false }
+spec = { harness = { id = "qwen-code", version = "TBD" }, native_tool_policy = { mode = "native", network_mode = "TBD", filesystem_roots = ["benchmark_workspace"], server_side_tools = "TBD", subagents_enabled = "TBD" } }
+
+[[systems]]
+schema_version = 2
+id = "native.kimi-code"
+track = "native"
+display_name = "Kimi Code CLI"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "planned", adapter = "kimi", executable = false }
+spec = { harness = { id = "kimi-code", version = "TBD" }, native_tool_policy = { mode = "native", network_mode = "TBD", filesystem_roots = ["benchmark_workspace"], server_side_tools = "TBD", subagents_enabled = "TBD" } }
+
+[[systems]]
+schema_version = 2
+id = "memory.simplemem"
+track = "memory"
+display_name = "SimpleMem dense retrieval"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "memory", executable = true }
+spec = { memory_system = { id = "simplemem", version = "repository" }, ingestion = { mode = "session_ordered", reset_scope = "run" }, retrieval = { mode = "dense", top_k = 3, context_token_budget = 0, budget_enforced = false, witness_required = false } }
+
+[[systems]]
+schema_version = 2
+id = "memory.iterative"
+track = "memory"
+display_name = "Iterative two-hop retrieval"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "memory", executable = true }
+spec = { memory_system = { id = "iterative", version = "repository" }, ingestion = { mode = "session_ordered", reset_scope = "run" }, retrieval = { mode = "iterative", top_k = 3, hop_max_tokens = 4096, hop_max_tokens_note = "legacy 默认 2048 在推理模型上会 output_truncated(见 D-20260920-03);v2 起为 4096,与历史 iterative 不可直接比", context_token_budget = 0, budget_enforced = false, witness_required = false } }
+
+[[systems]]
+schema_version = 2
+id = "memory.fullcontext"
+track = "memory"
+display_name = "FullContext reference"
+status = "candidate"
+role = "reference"
+implementation = { runner = "memory", executable = true }
+spec = { memory_system = { id = "fullcontext", version = "repository", full_context_char_budget = 120000 }, ingestion = { mode = "session_ordered", reset_scope = "run" }, retrieval = { mode = "full_context", top_k = 0, context_token_budget = 0, budget_enforced = false, witness_required = false } }
+
+[[systems]]
+schema_version = 2
+id = "memory.mem0-oss"
+track = "memory"
+display_name = "Mem0 OSS"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "memory", adapter = "mem0", executable = true, requires_memory_config = true }
+spec = { memory_system = { id = "mem0", version = "2.0.7", internal_models = "experiment", embedding_provider = "huggingface", embedding_model = "BAAI/bge-small-zh-v1.5", vector_provider = "qdrant" }, ingestion = { mode = "session_ordered", reset_scope = "run", cleanup_scope = "collection" }, retrieval = { mode = "native", top_k = 3, context_token_budget = 0, budget_enforced = false, witness_required = false } }
+
+[[systems]]
+schema_version = 2
+id = "memory.graphiti-oss"
+track = "memory"
+display_name = "Graphiti OSS"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "planned", executable = false }
+spec = { memory_system = { id = "graphiti_oss", version = "TBD", graph_backend = "TBD", internal_models = "TBD" }, ingestion = { mode = "session_ordered_with_reference_time", reset_scope = "run" }, retrieval = { mode = "native", context_token_budget = "TBD", witness_required = true } }
+
+[[systems]]
+schema_version = 2
+id = "memory.memos"
+track = "memory"
+display_name = "MemOS"
+status = "candidate"
+role = "benchmark"
+implementation = { runner = "planned", executable = false }
+spec = { memory_system = { id = "memos", version = "TBD", deployment = "TBD", internal_models = "TBD" }, ingestion = { mode = "session_ordered", reset_scope = "run" }, retrieval = { mode = "native", context_token_budget = "TBD", witness_required = true } }

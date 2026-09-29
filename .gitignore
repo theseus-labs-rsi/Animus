@@ -3,6 +3,12 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 venv*/
+.venv/
+
+# Node dependencies and local tool caches
+node_modules/
+.npm-global/
+.cache/
 
 # Credentials and local configuration
 .env

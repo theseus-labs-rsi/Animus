@@ -1,41 +1,24 @@
-"""no-think chat 网关（stdlib + httpx）—— `services/embed_server.py` 的无依赖替代品。
+"""聊天转发网关，使用 Python 标准库与 httpx。
 
-用途与 `embed_server.py` 的 `POST /v1/chat/completions` 完全一致：
+处理 POST /v1/chat/completions：向非 DMXAPI 上游传递
+chat_template_kwargs.enable_thinking=False 的默认值，移除响应中的
+<think> 内容，并对超时和传输异常进行重试。
 
-- 对非 DMXAPI 上游注入 `chat_template_kwargs.enable_thinking=False`；
-- 剥掉响应里的 `<think>…</think>`（兜底：上游不认该字段时仍有保护）；
-- 超时重试 3 次。
-
-**为什么需要它**：`embed_server.py` 依赖 `fastapi`/`uvicorn`，而这两个包不在任何
-requirements 里（只在 docker-compose 的容器里可用），macOS venv 起不来。当被测系统
-的 embedding 不走网关时（例如 mem0 用 `huggingface` provider 在本地跑 bge），
-就只需要 chat 转发这一半功能，本文件即可满足，且不引入新依赖。
-
-**为什么必须关 thinking**：推理模型的 `reasoning_content` 会吃掉补全预算，
-机械抽取（带 `response_format=json_object`）的结果被截断成非法 JSON，触发 adapter 的
-json 守卫 fail-closed，整个 ingest 中止。长语料下必然发生，且调大 `max_tokens` 只能把
-失败点往后推（实测 2000 → 第 27 篇，8000 → 第 114 篇）。关掉 thinking 让
-`reasoning_tokens` 归 0，是唯一确定性修法。详见
-`output/local_services/mem0_smoke_report.md` 的三次 run 对照。
+httpx 已包含在 requirements-minimal.txt 中。需要本地 embedding 时，
+可使用 services.embed_server；其服务依赖收录在 requirements.txt。
 
 用法：
 
-    # 上游地址与 key 只走环境变量（见 services/run_eval.sh 的约定）
-    export LLM_UPSTREAM="$DEEPSEEK_BASE_URL"     # 或 INGEST_LLM_BASE_URL / OPENAI_BASE_URL
-    export OPENAI_API_KEY="$DEEPSEEK_API_KEY"    # 或 --api-key-env 指定别的变量名
+    export LLM_UPSTREAM="$DEEPSEEK_BASE_URL"
+    export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
     ./venv/bin/python -m services.no_think_proxy --port 9800
 
-    # 让 harness 的 ingest LLM 指向它（secrets.env 或 shell export 均可）
     export INGEST_LLM_BASE_URL=http://127.0.0.1:9800/v1
     ./venv/bin/python -m agent_harnesses preflight --experiment <toml>
 
-安全：**不要把 API key 写在命令行参数上** —— `ps`/`pgrep -fl` 会把 argv 暴露给同机
-其它进程。key 只从环境变量读（`--api-key-env`，默认 `OPENAI_API_KEY`）。
-
-网络：上游调用固定 `trust_env=False`，**不走 `HTTP(S)_PROXY`**。与
-`services/run_eval.sh`「unset 全部代理、绝不走代理」的约定一致 —— 经代理会间歇性
-`httpx.ProxyError: 502`，直连实测还快约 6×。传输层异常（Timeout / Connect / Read /
-Proxy）统一重试 3 次并退避，不会穿出循环崩掉 handler。
+上游地址也可读取 INGEST_LLM_BASE_URL 或 OPENAI_BASE_URL。凭据从环境变量
+读取，--api-key-env 可指定变量名，默认 OPENAI_API_KEY。
+上游连接设置 trust_env=False，直接连接配置的端点。
 """
 from __future__ import annotations
 

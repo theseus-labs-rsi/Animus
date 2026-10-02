@@ -5,13 +5,13 @@
   <a href="README.en.md"><img src="assets/readme/language/en.svg" alt="Switch to English" width="96" height="34"></a>
 </p>
 
-Animus 从结构化 seed 生成随时间演变的领域世界、文书和评测题，覆盖信息提取、知识更新、时间推理、多跳关系与来源冲突等能力。生成流程支持逐题审查、四模型试答和标准 benchmark 导出。
+Animus 从结构化 seed 和生成目标规划随时间演变的领域世界，先生成文书，再生成有材料依据的评测题，覆盖信息提取、知识更新、时间推理、多跳关系与来源冲突等能力。流程支持逐线供给规划、逐题审查、四模型试答和标准 benchmark 导出。
 
 [试答结果](#试答结果) · [案例](#案例) · [快速开始](#快速开始)
 
 ## 试答结果
 
-两张图汇总生成期筛选样本中的 240 道题，覆盖法律、金融、鉴证和保险四个领域。图中列出四选手成绩、七项能力表现和题量分布。
+两张图汇总既有生成期筛选样本中的 240 道题，覆盖法律、金融、鉴证和保险四个领域。图中列出四选手成绩、七项能力表现和题量分布。
 
 ![240 道题的四选手总成绩、七项能力雷达图和四领域成绩](assets/readme/01_performance_dashboard.png)
 
@@ -121,18 +121,45 @@ cp configs/env/secrets.env.example configs/env/secrets.env
 npm install --global @openai/codex@0.153.2 @deepseek-ai/dsh@0.1.2-rc.1
 ```
 
-在 `.env` 配置生成与裁判接口，在 `configs/env/secrets.env` 配置四模型接口。另见[模型配置](examples/release_four.json)与 [DSH profile](configs/dsh/README.md)。
+在 `.env` 填写 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `MODEL`；`STRUCTURE_MODEL` 可单独指定世界设计模型。四模型试答使用 `configs/env/secrets.env` 中的接口和[模型配置](examples/release_four.json)，另见 [DSH profile](configs/dsh/README.md)。
 
 ### 生成与筛选
 
-准备 seed JSON，格式见 [schema](schemas/seed_pack_v2.schema.json) 和[转换指南](skills/realfiles-to-seedjson/SEEDJSON_GUIDE.md)。
+准备 seed JSON，格式见 [schema](schemas/seed_pack_v2.schema.json)、[转换指南](skills/realfiles-to-seedjson/SEEDJSON_GUIDE.md)和[合成示例](skills/realfiles-to-seedjson/examples/seed_v2_example.json)。seed 提供领域背景与约束；白皮书根据 seed、题量和语料目标设计实体、关系及跨期业务过程，再由程序检查并执行实例计划。
+
+将交付目标保存为 `path/to/target.json`。以下 V1 目标要求四模型筛选后至少 200 题，总语料至少 100 万 token，并在列出的六条产线间均衡分配；`per_line_min`、`per_line_max` 可设置逐线题量边界。
+
+```json
+{
+  "version": 1,
+  "count_stage": "selection_complete",
+  "final_questions": 200,
+  "requested_lines": [
+    "L1_timeline", "L2_relational", "L5_conflict",
+    "L6_refusal", "L7_consolidation", "L8_transition"
+  ],
+  "per_line_min": {},
+  "per_line_max": {},
+  "corpus_tokens": 1000000,
+  "tokenizer": "cl100k_base@0.12.0",
+  "max_supply_rounds": 3
+}
+```
 
 ```powershell
 .\venv\Scripts\python.exe -X utf8 tools/validate_seed_packs.py path/to/seed.json --require-generation-ready
-.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --seed-pack path/to/seed.json --min-questions 200 --target-mchars 1 --haystack-ratio 9 --semantic-workers 4 --release
+.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --seed-pack path/to/seed.json --delivery-target path/to/target.json --haystack-ratio 9 --semantic-workers 4 --release
 ```
 
-`--release` 启用四模型试答，并剔除全员答对的题；省略时运行生成流程。`--target-mchars 1` 指定 100 万字符的正文目标，`--haystack-ratio 9` 指定草堆与其余正文至少 9:1。Linux/macOS 将解释器换成 `./venv/bin/python`。
+系统先规划逐线供给，再生成世界、公开安排和出题订单；检查订单后生成正式材料与草堆，再完成题目表述、材料接地和质量审查。V1 默认预留筛后目标三倍的候选额度，并根据各线缺口补供给，轮数受 `max_supply_rounds` 限制。
+
+`--release` 使用 `examples/release_four.json` 启用四模型试答，并按其配置剔除全员答对的题。只做生成与质量审查时，省略 `--release` 并加 `--to quality`。Linux/macOS 将解释器换成 `./venv/bin/python`。
+
+语料 token 按文档正文、指定 tokenizer 和固定版本计数。上例的 `--haystack-ratio 9` 仍按字符指定草堆与其余正文至少 9:1；旧参数 `--target-mchars`（兼容别名 `--target-mtokens`）也按字符计量，不能与 `--delivery-target` 混用。
+
+V2 生成目标使用 `candidate_questions`、`core_tokens` 和 `filler_ratio`，在四模型筛选前计数，并以 token 约束正式材料和草堆规模。当前生产控制器尚未适配 V2 的收尾报表，运行到质量阶段后会触发 `TypeError`。
+
+`LLM_CONCURRENCY` 限制实际在途模型请求，`--semantic-workers` 控制逐题语义审阅并行数（1–16）。单次请求的总截止和 HTTP 读取超时可在 `.env` 中设置 `LLM_DEADLINE_S`、`LLM_HTTP_READ_TIMEOUT_S`。完整参数见 `python -m pipeline.factory --help`。
 
 ### 续跑
 
@@ -140,17 +167,31 @@ npm install --global @openai/codex@0.153.2 @deepseek-ai/dsh@0.1.2-rc.1
 .\venv\Scripts\python.exe -X utf8 -m pipeline.factory --run <run_id>
 ```
 
+续跑沿用 run 中冻结的 seed、目标和已完成阶段；阶段内检查点须通过输入及实现校验才会复用。改变 seed 或交付目标需新建 run。生产状态若为 `review_recovery_required`、`design_diagnosis_required` 或 `round_limit`，需先处理记录的原因再恢复。
+
 已有完整生成结果时，补做试答与筛选：
 
 ```powershell
 .\venv\Scripts\python.exe -X utf8 -m pipeline.factory --run <run_id> --release --from quality
 ```
 
-完整参数见 `python -m pipeline.factory --help`。发布配置默认关闭 `L3_process_trace` 过程题，其过程语义评分尚未接入。
+`L3_process` 的过程题生成默认关闭，可用 `--process-questions` 启用。原生四模型评分当前尚不支持 `L3_process_trace`；上述筛选示例因此采用六线目标，含过程题的运行可停在 `quality`。
 
 ### 输出
 
-结果保存在 `output/runs/<run_id>/`：`07_release.json` 记录质量审查，`08_calibration.json` 记录试答状态，`09_selection.json` 记录筛选结果。标准包位于该目录下的 `delivery/<attempt>/benchmark/`。
+结果保存在 `output/runs/<run_id>/`：
+
+| 文件 | 内容 |
+|---|---|
+| `manifest.json`、`11_production.json` | 阶段状态、冻结配置与供给轮次 |
+| `01_whitepaper.json`、`02_world.json` | 世界设计与执行后的业务事实 |
+| `03_orders.json`、`04_questions.json` | 出题订单与候选题 |
+| `05_corpus.json`、`05_corpus_token_scale.json` | 文档语料与正式材料、草堆的实际 token 数 |
+| `06_grounded_questions.json`、`07_release.json` | 接地后题目、逐题审查结果和质量资格 |
+| `08_calibration.json`、`09_selection.json` | 四模型试答状态与筛选结果 |
+| `10_delivery_target.json` | 逐线题量、语料规模与交付目标的实测对照 |
+
+审查降级会保留候选和警告，并反映在质量资格与交付报告中。`07_release.json` 的 `eligible` 记录质量资格；目标达成情况见 `10_delivery_target.json` 与 `11_production.json`。筛选得到可交付题目后，标准包位于该目录下的 `delivery/<attempt>/benchmark/`。
 
 ## 目录
 
@@ -163,4 +204,4 @@ npm install --global @openai/codex@0.153.2 @deepseek-ai/dsh@0.1.2-rc.1
 | [services/](services/README.md) | 可选网关、GPU 服务和多系统评测脚本 |
 | `tools/`、`tests/` | 检查工具与测试 |
 
-依赖分为[基础环境](requirements-minimal.txt)、[完整评测环境](requirements.txt)和 [Mem0 接入](requirements-memory-mem0.txt)。按运行内容安装。
+依赖分为[基础环境](requirements-minimal.txt)、[完整评测环境](requirements.txt)、[Mem0 接入](requirements-memory-mem0.txt)和[开发验证环境](requirements-test.txt)。按运行内容安装。安装开发验证环境后，可运行 `python -B tools/verify_repository.py` 执行隔离外部网络的回归检查，日志保存在 `output/repository_verification/`。

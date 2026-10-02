@@ -226,7 +226,7 @@ def is_judgeable(q: dict) -> bool:
     time_unit = (q.get("aux") or {}).get("time_unit")
     if time_unit is not None and (not isinstance(time_unit, str) or not time_unit.strip()):
         return False
-    if contract and (contract.get("version") != 1 or contract.get("answer_kind") not in
+    if contract and (contract.get("version") not in (1, 2) or contract.get("answer_kind") not in
                      {"value", "enum", "time", "order", "set", "abstention", "structured"}):
         return False
     aliases = contract.get("allowed_aliases", [])

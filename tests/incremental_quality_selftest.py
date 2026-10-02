@@ -85,7 +85,7 @@ class IncrementalQualityTests(unittest.TestCase):
             done.add(0)
             save()
             raise RuntimeError("fixture interruption")
-        with patch.object(factory, "render_corpus", interrupted):
+        with patch.object(factory, "render_corpus", interrupted), self.assertRaisesRegex(RuntimeError, "fixture interruption"):
             factory.stage_corpus(self.run)
         self.assertEqual((self.run.dir / factory.ART["corpus"]).read_bytes(), old_bytes)
         self.assertTrue(self.run.has(factory.CORPUS_CKPT))
@@ -103,7 +103,7 @@ class IncrementalQualityTests(unittest.TestCase):
             done.add(0)
             save()
             raise RuntimeError("fixture interruption")
-        with patch.object(factory, "render_corpus", interrupted):
+        with patch.object(factory, "render_corpus", interrupted), self.assertRaisesRegex(RuntimeError, "fixture interruption"):
             factory.stage_corpus(self.run)
         def resume(wp, ws, target, tracer, corpus, done, save, log, **scope):
             self.assertIsNone(scope["only_entities"])
@@ -121,6 +121,29 @@ class IncrementalQualityTests(unittest.TestCase):
         self.assertFalse(self.run.has(factory.CORPUS_WARNING))
         self.assertFalse(self.run.has("05_corpus_candidate.json"))
         self.assert_inputs_unchanged(inputs)
+
+    def test_v6_review_limit_retains_partial_corpus_for_question_stage(self):
+        from pipeline.render import MaterialRejected
+        self.run.manifest["config"].pop("render_only")
+        self.run.manifest["config"]["production_control"] = {"version": "supply-driven/v6"}
+        self.run.write(factory.ART["whitepaper"], {
+            "domain_profile": {}, "quality_contract": {"corpus_review": True}})
+        (self.run.dir / factory.ART["corpus"]).unlink()
+        def review_exhausted(wp, ws, target, tracer, corpus, done, save, log, **scope):
+            self.assertTrue(scope["allow_exploratory_review"])
+            corpus["sessions"].append(reviewed_session(ws, 0))
+            done.add(0)
+            save()
+            raise MaterialRejected(1, {"group": "fixture"}, [{"draft": 1}], ["unsupported"])
+        with patch.object(factory, "render_corpus", review_exhausted), patch.object(
+                factory, "_require_v6_supply_gate"):
+            factory.stage_corpus(self.run)
+        self.assertEqual(self.run.read(factory.ART["corpus"])["done_weeks"], [0])
+        self.assertEqual(self.run.read(factory.CORPUS_WARNING)["continuation"], "review_limit")
+        self.assertFalse(self.run.read(factory.CORPUS_WARNING)["release_eligible"])
+        self.assertTrue(factory._corpus_is_current(self.run))
+        self.run.write("05_corpus_candidate.json", {"corpus": {"sessions": []}, "done_weeks": []})
+        self.assertFalse(factory._corpus_is_current(self.run))
 
     def test_full_refresh_resumes_exact_bound_partial_candidate_without_checkpoint(self):
         self.run.manifest["config"].pop("render_only")

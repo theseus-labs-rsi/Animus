@@ -142,19 +142,83 @@ def _experiment(benchmark: Path, directory: Path, settings: dict):
 
 class _Budget:
     """Reserve before each physical judge request; retain usage across resumes."""
-    def __init__(self, path: Path, limit: int):
-        self.path, self.limit = path, limit
+    def __init__(self, path: Path, limit: int, *, shared: bool = False):
+        self.path, self.limit, self.shared = Path(path), limit, shared
+        if shared:
+            if type(limit) is not int or limit < 1:
+                raise ValueError("production judge cap must be a positive integer")
+            with self._ledger_lock():
+                self.used = self._shared_used()
+                if not self.path.exists():
+                    self._save_shared()
+            return
         previous = _read(path, {})
         self.used = int(previous.get("reserved_calls", 0))
         if self.used < 0:
             raise ValueError("invalid native judge budget ledger")
 
     def reserve(self):
+        if self.shared:
+            with self._ledger_lock():
+                self.used = self._shared_used()
+                if self.used >= self.limit:
+                    raise RuntimeError(f"production judge call budget exhausted ({self.used}/{self.limit})")
+                self.used += 1
+                self._save_shared()
+            return
         if self.used >= self.limit:
             raise RuntimeError(f"native judge call budget exhausted ({self.used}/{self.limit})")
         self.used += 1
         _write(self.path, {"max_judge_calls": self.limit, "reserved_calls": self.used,
                            "policy": "reserved before physical call; failed calls remain counted"})
+
+    def _shared_used(self):
+        previous = _read(self.path, None)
+        if previous is None:
+            return 0
+        if (not isinstance(previous, dict)
+                or previous.get("version") != "production-judge-budget/v1"
+                or type(previous.get("max_judge_calls")) is not int
+                or previous["max_judge_calls"] != self.limit):
+            raise ValueError("production judge cap/ledger binding changed; retain the frozen shared ledger")
+        used = previous.get("reserved_calls")
+        if type(used) is not int or not 0 <= used <= self.limit:
+            raise ValueError("invalid production judge reservation count")
+        return used
+
+    def _save_shared(self):
+        _write(self.path, {"version": "production-judge-budget/v1",
+                          "max_judge_calls": self.limit, "reserved_calls": self.used,
+                          "policy": "reserved before physical call; failed calls remain counted"})
+
+    def _ledger_lock(self):
+        """Serialize independent context budgets without storing any query payload."""
+        from contextlib import contextmanager
+        import os
+        @contextmanager
+        def locked():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.with_suffix(self.path.suffix + ".lock").open("a+b") as handle:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0, os.SEEK_END)
+                    if handle.tell() == 0:
+                        handle.write(b"\0")
+                        handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    if os.name == "nt":
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return locked()
 
 
 def _bounded_judge(judge, settings: dict, budget: _Budget):
@@ -223,7 +287,8 @@ class _CachedJudge:
         return self._call("judge_l2_partial", q, pred, use_llm)
 
 
-def execute_native_evaluation(benchmark: Path, directory: Path, settings: dict) -> dict[str, Path]:
+def execute_native_evaluation(benchmark: Path, directory: Path, settings: dict, *,
+                              shared_judge_budget: Path | None = None) -> dict[str, Path]:
     """Return target -> native run with judged.jsonl. Makes calls only after preflight.
 
     Native answer count is bounded by the benchmark size times four; each native
@@ -250,7 +315,8 @@ def execute_native_evaluation(benchmark: Path, directory: Path, settings: dict) 
     failures = [f"{key}: {'; '.join(map(str, r.get('errors') or []))}" for key, r in reports.items() if not r.get("ok")]
     if failures:
         raise ConfigurationError("native evaluation preflight failed: " + " | ".join(failures))
-    budget = _Budget(directory / "judge_budget.json", _positive(settings, "max_judge_calls", 2000))
+    budget = _Budget(shared_judge_budget if shared_judge_budget is not None else directory / "judge_budget.json",
+                     _positive(settings, "max_judge_calls", 2000), shared=shared_judge_budget is not None)
     judge = _bounded_judge(load_judge(REPOSITORY_ROOT), settings, budget)
     results = execute_many(experiment, systems, plans, resume=True,
                            parallel_plans=_positive(settings, "parallel_targets", 2))

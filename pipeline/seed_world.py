@@ -141,6 +141,39 @@ def causal_roles_match(rule: dict, parent: dict, child: dict) -> bool:
                for role in rule.get("shared_roles", []))
 
 
+def event_relation_binding_findings(ws: WorldState, blueprint: dict, event: dict,
+                                    valid_relations: dict[str, list[str]]) -> list[dict]:
+    """One execution rule for event roles against the canonical relation timeline."""
+    declarations = {row["id"]: row for row in blueprint.get("event_types", [])}
+    relations = {row["id"]: row for row in blueprint.get("relation_types", [])}
+    participants = event.get("participants") or {}
+    findings = []
+    for binding in declarations.get(event.get("type"), {}).get("relation_bindings", []):
+        relation_id = binding.get("relation")
+        relation = relations.get(relation_id, {})
+        source, target = (participants.get(binding.get("from_role")),
+                          participants.get(binding.get("to_role")))
+        side = relation_owner_side(blueprint, relation)
+        owner, referred = (source, target) if side == "from" else (target, source)
+        timeline = ws.timeline(owner, relation.get("field"))
+        session = event.get("session")
+        current = timeline.value_at_session(session) if timeline is not None and type(session) is int else None
+        valid = (side is not None and source in ws.entities and target in ws.entities
+                 and type(session) is int and 0 <= session < ws.n_sessions
+                 and timeline is not None and current == referred
+                 and any(row.get("id") in valid_relations.get(relation_id, [])
+                         and row.get("from") == source and row.get("to") == target
+                         and row["session"] <= session for row in ws.relations))
+        if not valid:
+            findings.append({"event": event.get("id"), "relation": relation_id,
+                "source": source, "target": target, "owner": owner,
+                "field": relation.get("field"), "session": session,
+                "required_value": referred, "actual_value": current,
+                "message": f"seed event {event.get('id')}: relation binding {relation_id} "
+                           f"does not hold for {source}->{target}@{session}"})
+    return findings
+
+
 def seed_world_report(wp: dict, ws: WorldState, *, require_complete: bool = True) -> dict:
     """Check a full world or the facts already committed to an Agent draft.
 
@@ -311,25 +344,10 @@ def seed_world_report(wp: dict, ws: WorldState, *, require_complete: bool = True
         valid = (valid and bool(effects) and actual_effects == expected_effects
                  and all(witness(effect.get("entity"), effect.get("field"), event.get("session"),
                                  effect.get("set", effect.get("value"))) for effect in effects))
-        for binding in declaration.get("relation_bindings", []):
-            relation_id = binding.get("relation")
-            relation = relation_declarations.get(relation_id, {})
-            source, target = (participants.get(binding.get("from_role")),
-                              participants.get(binding.get("to_role")))
-            side = relation_owner_side(blueprint, relation)
-            owner, referred = (source, target) if side == "from" else (target, source)
-            timeline = ws.timeline(owner, relation.get("field"))
-            session = event.get("session")
-            binding_valid = (side is not None and source in ws.entities and target in ws.entities
-                             and type(session) is int and 0 <= session < ws.n_sessions
-                             and timeline is not None and timeline.value_at_session(session) == referred
-                             and any(row.get("id") in valid_relations.get(relation_id, [])
-                                     and row.get("from") == source and row.get("to") == target
-                                     and row["session"] <= session for row in ws.relations))
-            if not binding_valid:
-                valid = False
-                issues.append(f"seed event {event.get('id')}: relation binding {relation_id} "
-                              f"does not hold for {source}->{target}@{session}")
+        binding_findings = event_relation_binding_findings(ws, blueprint, event, valid_relations)
+        if binding_findings:
+            valid = False
+            issues.extend(row["message"] for row in binding_findings)
         if valid:
             valid_events.setdefault(type_id, []).append(event)
             structural_witnesses.update((effect.get("entity"), effect.get("field"), event["session"],

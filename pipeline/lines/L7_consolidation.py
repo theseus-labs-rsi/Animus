@@ -71,10 +71,112 @@ def _change_count(tl) -> int:
     return len(tl.change_ops()) if tl else 0
 
 
+def _native_supply_enabled(wp=None, profile=None) -> bool:
+    """The frozen supply contract opts in; legacy worlds retain planted S1."""
+    wp, profile = wp or {}, profile or {}
+    plan = wp.get("supply_plan") or {}
+    contract = wp.get("generation_contract") or {}
+    return (plan.get("version") == 2
+            or isinstance(contract, dict) and contract.get("version") == "supply-driven/v3"
+            or profile.get("supply_policy") == "capacity_contract/v2")
+
+
+def _declared_numeric_fields(ws) -> set[tuple[str, str]]:
+    declarations = {item.get("id"): {field.get("name") for field in item.get("fields", [])
+                    if field.get("kind") == "numeric"}
+                    for item in (getattr(ws, "world_blueprint", None) or {}).get("entity_types", [])}
+    return {(entity, name) for entity, fields in ws.entities.items() for name in fields
+            if name in declarations.get(ws.entity_types.get(entity), set())}
+
+
+def _native_sequence_reason(ws, entity, field, *, declared=None) -> str | None:
+    """Use complete observed numeric trajectories, without editing any values."""
+    declared = _declared_numeric_fields(ws) if declared is None else declared
+    if (entity, field) not in declared:
+        return "undeclared_numeric_field"
+    timeline = ws.entities.get(entity, {}).get(field)
+    points = timeline.set_values() if timeline else []
+    if any(op.op not in ("SET", "UPDATE") for op in timeline.ops):
+        return "interrupted_trajectory"
+    if any(_to_num(value) is None for _session, _date, value in points):
+        return "nonnumeric_observation"
+    if len({session for session, _date, _value in points}) < T_MIN:
+        return "insufficient_distinct_periods"
+    nums = _numeric_seq(timeline)
+    label = _trend_label(nums)
+    if label is None:
+        return "unclear_net_direction"
+    if not _anti_recency(nums, label):
+        return "local_direction_shortcut"
+    return None
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # L7 产线
 # ════════════════════════════════════════════════════════════════════════════
 class ConsolidationLine(ProductionLine):
+    def planned_observations(self, carrier, blueprint, objects, events, ownership):
+        if carrier.get('subtype') != 'native_trend':return []
+        periods=blueprint['temporal_model']['n_sessions']
+        if periods<T_MIN:return []
+        types={t['id']:t for t in blueprint['entity_types']}
+        result=[]
+        for entity in carrier.get('entities',[]):
+            if entity not in objects or objects[entity]['type'] not in types:continue
+            kind=objects[entity]['type'];field=carrier.get('field')
+            declaration=next((f for f in types[kind]['fields'] if f['name']==field),{})
+            if declaration.get('kind')!='numeric' or declaration.get('monotonic') in ('up','down'):continue
+            if field in ownership[kind]['intrinsic_fields']:
+                sessions=list(range(periods))
+            else:
+                specs={e['id']:e for e in blueprint['event_types']}
+                sessions=sorted({0}|{e['session'] for e in events.values()
+                    for effect in specs[e['type']]['effect_fields']
+                    if effect['field']==field and e['participants'][effect['role']]==entity})
+            if len(sessions)>=T_MIN:
+                result.append({'entity':entity,'field':field,'sessions':sessions,
+                    'minimum_points':T_MIN,
+                    'mechanism':'按原业务过程逐期记录既有数值字段，具体读数由事实作者创作'})
+        return result
+
+    def construction_spec(self):
+        return {"native_trend": {"distinct_periods": T_MIN, "net_fraction_of_range": NET_FRAC,
+                "local_opposite_direction_required": True, "declared_numeric_only": True},
+                "comparison": {"cohort_basis": "actual_type_and_stable_owner",
+                "minimum_change_count_margin": CMP_MARGIN, "cohort_frozen_before_values": True}}
+
+    def construction_issues(self, carrier, blueprint, objects, events, observations):
+        subtype = carrier.get("subtype")
+        if subtype not in ("native_trend", "compare"):
+            return [{"code": "consolidation_subtype", "message": "Choose native_trend or compare", "actual": subtype}]
+        kinds = {t["id"]: t for t in blueprint["entity_types"]}
+        field = carrier.get("field")
+        if subtype == "native_trend":
+            for entity in carrier["entities"]:
+                declaration = next((f for f in kinds[objects[entity]["type"]]["fields"] if f["name"] == field), {})
+                sessions = {s for o in observations if o.get("entity") == entity and o.get("field") == field for s in o["sessions"]}
+                if declaration.get("kind") == "numeric" and declaration.get("monotonic") not in ("up", "down") and len(sessions) >= T_MIN:
+                    writers = [e for e in blueprint["event_types"] for effect in e["effect_fields"]
+                        if e["roles"][effect["role"]] == objects[entity]["type"] and effect["field"] == field]
+                    if writers:
+                        write_periods = {event["session"] for event in events.values() for spec in writers
+                            if event["type"] == spec["id"] and any(event["participants"][eff["role"]] == entity
+                            for eff in spec["effect_fields"] if eff["field"] == field)}
+                        if len(write_periods | {0}) < T_MIN:
+                            return [{"code":"native_trend_temporal_capacity","message":"Event-owned trend needs enough actual write periods, including the allowed initial state",
+                                     "field":field,"write_periods":sorted(write_periods),"required_points":T_MIN}]
+                    return []
+            return [{"code": "native_trend_plan", "message": "Declare an applicable numeric field with four distinct observation periods"}]
+        return []
+
+    def value_issues(self, world, carrier):
+        if carrier.get("subtype") != "native_trend":
+            return []
+        reasons = {e: _native_sequence_reason(world, e, carrier.get("field")) for e in carrier["entities"] if e in world.entities}
+        if any(reason is None for reason in reasons.values()):
+            return []
+        return [{"code": "native_trajectory", "message": "Create business-grounded observations satisfying the original native trend rule",
+                 "actual": reasons, "conditions": self.construction_spec()["native_trend"]}]
     id = "L7_consolidation"
     title = "巩固摘要"
     memory = "长跨度趋势/对比归纳(整段方向、谁变最多;非逐字)"
@@ -84,7 +186,9 @@ class ConsolidationLine(ProductionLine):
 
     def feasible(self, ws, profile: dict) -> tuple[bool, str]:
         """Use the actual candidate constructors, including trend and margin rules."""
-        n_s1, n_s2 = len(self._enum_trend(ws)), len(self._enum_compare(ws))
+        native = _native_supply_enabled(profile=profile)
+        n_s1 = len(self._enum_trend(ws, native=native))
+        n_s2 = len(self._enum_cohort_compare(ws) if native else self._enum_compare(ws))
         tags = ([f"S1趋势={n_s1}"] if n_s1 else []) + ([f"S2对比={n_s2}"] if n_s2 else [])
         if tags:
             return True, f"可产归纳型:{'/'.join(tags)}"
@@ -104,27 +208,41 @@ class ConsolidationLine(ProductionLine):
     def enumerate(self, ws, target: int = 200, wp=None) -> list[dict]:
         if target <= 0:
             return []
+        delivery = isinstance(wp, dict) and "delivery_target" in wp
+        if delivery:
+            from pipeline.delivery_target import DeliveryTarget
+            DeliveryTarget.from_dict(wp["delivery_target"])
         rng = random.Random(_SEED)
-        out = self._enum_trend(ws) + self._enum_compare(ws)
+        native = _native_supply_enabled(wp, (wp or {}).get("domain_profile"))
+        out = self._enum_trend(ws, native=native) + (self._enum_cohort_compare(ws) if delivery else self._enum_compare(ws))
         rng.shuffle(out)
         # 同(实体,型)只出一题:控冗余、促覆盖
         picked, seen = [], set()
         for o in out:
-            key = (o["entity"], o["aux"]["sub"])
+            key = (o["entity"], o["field"], o["aux"]["sub"]) if delivery else (o["entity"], o["aux"]["sub"])
             if key in seen:
+                continue
+            if delivery and self.well_posed(o, ws)[0] != "well_posed":
                 continue
             seen.add(key); picked.append(o)
             if len(picked) >= target:
                 break
         return picked
 
-    def _enum_trend(self, ws) -> list[dict]:
-        """S1:只对【imprint 真正种下趋势的字段】(ws._trended_fields)出题。
+    def _enum_trend(self, ws, *, native=False) -> list[dict]:
+        """S1 uses authored numeric trajectories in v2, planted metadata in v1.
         ★审计 HIGH 根治:旧版扫【所有】数值字段跑 _trend_label,而'首末净方向'对纯噪声放行率 62.7%
           → 非 imprint 的 LLM 噪声字段(如 4 点 [57,56,68,10])照产 gold=下降 的软题,违反本线契约
           '模棱两可一律跳'。改为只骑 planted 趋势(噪声字段根本不判),从根上杜绝软 gold——契合
           'LLM 给噪声、代码种结构、L7 骑结构'的设计本意,非去调分类器阈值猜噪声(那才是打地鼠)。"""
         trended = set(getattr(ws, "_trended_fields", []) or [])
+        planted = set(trended)
+        # Supply-driven authors create the numeric history themselves. Numeric
+        # declarations and the existing classifier authorize reading that
+        # history; planted-field metadata is unnecessary on this opt-in path.
+        declared = _declared_numeric_fields(ws) if native else set()
+        if native:
+            trended |= declared
         out = []
         for (ent, fname) in sorted(trended):
             tl = ws.entities.get(ent, {}).get(fname)
@@ -132,11 +250,79 @@ class ConsolidationLine(ProductionLine):
                 continue
             nums = _numeric_seq(tl)
             label = _trend_label(nums)
+            native_field = native and (ent, fname) not in planted
+            if native_field and _native_sequence_reason(ws, ent, fname, declared=declared):
+                continue
             if label and _anti_recency(nums, label):
-                out.append({"line": self.id, "capability": "L7_consolidation", "entity": ent, "field": fname,
+                order = {"line": self.id, "capability": "L7_consolidation", "entity": ent, "field": fname,
                             "gt": label,
                             "evidence_sessions": sorted({s for (s, _d, v) in tl.set_values() if _to_num(v) is not None}),
-                            "aux": {"sub": "S1_trend", "n_points": len(nums)}})
+                            "aux": {"sub": "S1_trend", "n_points": len(nums)}}
+                if native_field:
+                    order["aux"]["supply_origin"] = "native_numeric_trajectory/v1"
+                out.append(order)
+        return out
+
+    def native_trend_capacity(self, ws) -> dict:
+        """Expose actual eligible/blocked histories to upstream capacity planning."""
+        declared = _declared_numeric_fields(ws)
+        rows = [{"entity": entity, "field": field,
+                 "n_points": len(_numeric_seq(ws.entities[entity][field])),
+                 "blocked_reason": _native_sequence_reason(ws, entity, field, declared=declared)}
+                for entity, field in sorted(declared)]
+        return {"eligible": sum(row["blocked_reason"] is None for row in rows), "fields": rows}
+
+    @staticmethod
+    def _natural_cohorts(ws) -> list[dict]:
+        """Make one deterministic partition from actual types/stable owners.
+
+        Each entity belongs to one cohort. A reference partitions its type only
+        when every member has that declared reference throughout the full time
+        span. Cohorts depend on world structure, before comparison winners are
+        computed, so a favorable outcome never drives regrouping.
+        """
+        blueprint = getattr(ws, "world_blueprint", None) or {}
+        declarations = {item["id"]: item for item in blueprint.get("entity_types", []) if isinstance(item, dict) and item.get("id")}
+        by_type = {}
+        for entity in sorted(ws.entities):
+            by_type.setdefault(ws.entity_types.get(entity), []).append(entity)
+        cohorts = []
+        for kind, members in sorted(by_type.items(), key=lambda item: str(item[0])):
+            fields = sorted(field["name"] for field in declarations.get(kind, {}).get("fields", [])
+                            if isinstance(field, dict) and field.get("kind") == "reference" and field.get("name"))
+            partition = None
+            for field in fields:
+                owners = {}
+                for entity in members:
+                    timeline = ws.entities[entity].get(field)
+                    values = timeline.set_values() if timeline else []
+                    distinct = {str(value) for _session, _date, value in values}
+                    if (not values or min(session for session, _date, _value in values) != 0
+                            or len(distinct) != 1 or not distinct.issubset(ws.entities)
+                            or any(op.op not in ("SET", "UPDATE") for op in timeline.ops)):
+                        break
+                    owners.setdefault(next(iter(distinct)), []).append(entity)
+                else:
+                    if len(owners) > 1 and any(len(group) >= 2 for group in owners.values()):
+                        partition = [{"basis": "stable_reference", "entity_type": kind,
+                                      "reference_field": field, "reference_value": owner, "members": group}
+                                     for owner, group in sorted(owners.items())]
+                        break
+            cohorts.extend(partition if partition is not None else [{"basis": "entity_type", "entity_type": kind, "members": members}])
+        return cohorts
+
+    def _enum_cohort_compare(self, ws) -> list[dict]:
+        """Reuse the original full-span comparator on disjoint natural groups."""
+        from copy import copy
+        out = []
+        for cohort in self._natural_cohorts(ws):
+            if len(cohort["members"]) < 2:
+                continue
+            view = copy(ws)
+            view.entities = {entity: ws.entities[entity] for entity in cohort["members"]}
+            for order in self._enum_compare(view):
+                order["aux"]["supply_cohort"] = {"version": 1, **cohort}
+                out.append(order)
         return out
 
     def _enum_compare(self, ws) -> list[dict]:
@@ -194,6 +380,10 @@ class ConsolidationLine(ProductionLine):
         sub, ent, fld = aux.get("sub"), order.get("entity"), order.get("field")
 
         if sub == "S1_trend":
+            if aux.get("supply_origin") == "native_numeric_trajectory/v1":
+                reason = _native_sequence_reason(ws, ent, fld)
+                if reason:
+                    return ("drop", f"真实数值轨迹准入失败:{reason}")
             nums = _numeric_seq(ws.entities.get(ent, {}).get(fld))
             label = _trend_label(nums)
             if label is None:                             # _trend_label 即【首末净方向】判定(≥NET_FRAC×摆幅),与 ANSWER_PROTOCOL v3 同口径

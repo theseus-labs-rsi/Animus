@@ -132,6 +132,16 @@ def _budgeted_lines(wp, ws, budget: int, log, stats: dict | None, *, process_ord
     priority = sorted(range(len(planned)), key=lambda i: (-(shares[i] - allocations[i]), i))
     for index in priority[:remainder]:
         allocations[index] += 1
+    supply_plan = wp.get("supply_plan") if wp.get("delivery_target") else None
+    support = {}
+    if supply_plan:
+        if supply_plan["candidate_budget"] != budget:
+            raise ValueError("Delivery candidate budget differs from the frozen supply plan")
+        support = {row["line"]: row for row in supply_plan["applicability"]}
+        planned = [(line_for(lid), 1.0, False) for lid in supply_plan["candidate_allocation"]]
+        if any(line is None for line, _, _ in planned):
+            raise ValueError("Delivery supply plan contains an unknown line")
+        allocations = [supply_plan["candidate_allocation"][line.id] for line, _, _ in planned]
     limit = max(1000, min(10000, budget * 20))
     report = {"mode": "total_budget", "question_budget": budget,
               "legacy_total_q": wp.get("capability_targets", {}).get("total_q"),
@@ -140,6 +150,9 @@ def _budgeted_lines(wp, ws, budget: int, log, stats: dict | None, *, process_ord
     selected = []
     for (line, weight, auto), allocated in zip(planned, allocations):
         feasible, reason = line.feasible(ws, profile)
+        declared = support.get(line.id)
+        if declared and not (declared["applicable"] and declared["implemented"]):
+            feasible, reason = False, declared["reason"]
         extra = process_orders if line.id == "L3_process" and process_orders is not None else []
         if extra and not feasible:
             feasible, reason = True, "Bounded typed process proposals are structurally available; semantics await review"
@@ -161,6 +174,13 @@ def _budgeted_lines(wp, ws, budget: int, log, stats: dict | None, *, process_ord
                 identity = json.dumps({key: order.get(key) for key in
                     ("line", "capability", "entity", "field", "gt", "aux")},
                     sort_keys=True, ensure_ascii=False)
+                if (supply_plan or {}).get("instance_policy"):
+                    from pipeline.capability_contract import verify_order
+                    certificate = verify_order(line,ws,order)
+                    if not certificate["passed"]:
+                        rejected["original_answer_certificate_failed"] += 1
+                        continue
+                    identity = certificate["family_key"]
                 if identity in identities:
                     row["duplicate_candidates"] += 1
                     continue
@@ -170,6 +190,15 @@ def _budgeted_lines(wp, ws, budget: int, log, stats: dict | None, *, process_ord
             for order in eligible:
                 pools.setdefault(order.get("capability", ""), []).append(order)
             picked, offset = [], 0
+            if (supply_plan or {}).get("instance_policy"):
+                from pipeline.capability_contract import family_key
+                requirement = next((r for r in supply_plan["requirements"] if r["line"] == line.id),{})
+                subtype_codes = {"native_trend":"S1_trend","compare":"S2_compare"}
+                for subtype,minimum in requirement.get("subtype_minimum",{}).items():
+                    choices = [o for o in eligible if (o.get("aux") or {}).get("sub") == subtype_codes[subtype]]
+                    picked.extend(choices[:minimum])
+                used = {family_key(o) for o in picked}
+                pools = {cap:[o for o in pool if family_key(o) not in used] for cap,pool in pools.items()}
             while len(picked) < allocated:
                 round_items = [pool[offset] for pool in pools.values() if len(pool) > offset]
                 if not round_items:
@@ -282,7 +311,7 @@ def prepare_lines(wp, ws, log=print):
     if blueprint and not blueprint.get("legacy_adapter"):
         # 显式世界蓝图已经冻结领域本体与动力学。一般能力线不能再注入字段或改轨迹；
         # 但允许显式声明 typed_overlay_safe 的产线，从冻结真值派生不改 canonical 的评测证据侧信道。
-        profile = wp.get("domain_profile", {})
+        profile = {**wp.get("domain_profile", {}), "supply_construction": getattr(ws, "supply_construction", {})}
         seen, overlays = set(), []
         for aid in [item.get("line") for item in wp.get("active_lines", [])]:
             line = line_for(aid)
@@ -298,7 +327,7 @@ def prepare_lines(wp, ws, log=print):
         else:
             log("  ✓ typed world 已冻结:能力线只读映射，canonical 不变")
         return
-    profile = wp.get("domain_profile", {})
+    profile = {**wp.get("domain_profile", {}), "supply_construction": getattr(ws, "supply_construction", {})}
     seen = set()
     for aid in [l.get("line") for l in wp.get("active_lines", [])]:
         line = line_for(aid)

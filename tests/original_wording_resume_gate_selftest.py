@@ -80,7 +80,7 @@ class WordingResumeGateTests(unittest.TestCase):
             function = stage.fn if real_questions and stage.name == "questions" else work
             stages.append(replace(stage, fn=function,
                 is_current=(lambda _: True)
-                if stage.name in ("disclosure", "quality") else stage.is_current))
+                if stage.name in ("disclosure", "grounding", "quality") else stage.is_current))
             if not self.run.has(stage.artifact):
                 self.run.write(stage.artifact, {})
             self.run.mark(stage.name, stage.artifact, 0)
@@ -175,7 +175,7 @@ class WordingResumeGateTests(unittest.TestCase):
         stages = self.completed_stages()
         self.run.write(factory.ART["questions"], [self.outdated()])
         for options in ({"from_stage": "grounding"}, {"only": "grounding"}, {"only": "quality"}):
-            with self.subTest(options=options), self.assertRaisesRegex(SystemExit, "questions"):
+            with self.subTest(options=options), self.assertRaisesRegex(SystemExit, "questions|grounding"):
                 drive(self.run, stages, **options)
         self.assertEqual(self.calls, [])
 
@@ -183,7 +183,9 @@ class WordingResumeGateTests(unittest.TestCase):
         stages = self.completed_stages(real_questions=True)
         self.run.write(factory.ART["questions"], [self.outdated()])
         corpus_before = (self.run.dir / factory.ART["corpus"]).read_bytes()
-        def rephrase(orders, wp, tracer, log, *, audit, checkpoint_path):
+        def rephrase(orders, wp, tracer, log, *, audit, checkpoint_path, corpus, public_protocol):
+            self.assertEqual(corpus, self.run.read(factory.ART["corpus"]))
+            self.assertIsInstance(public_protocol, str)
             self.assertEqual(checkpoint_path, self.run.dir / "04_wording.ckpt.json")
             self.assertEqual(orders, [self.question])
             audit.update(original_count=1, returned_qids=[self.question["qid"]], execution_status="completed")

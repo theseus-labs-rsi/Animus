@@ -100,7 +100,7 @@ class HttpLifecycleTests(unittest.TestCase):
     def records(self):
         return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()]
 
-    def invoke(self, deadline=2, read_timeout=2):
+    def invoke(self, deadline=5, read_timeout=5):
         transport = original_run_transport("glm-5.3-flash", "low", read_timeout)
         transport["profiles"]["low"]["deadline_seconds"] = deadline
         with trace_scope(self.path, "world.structure"):

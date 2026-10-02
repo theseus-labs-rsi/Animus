@@ -257,6 +257,7 @@ class JudgeContractTest(unittest.TestCase):
 
     def test_protocol_v5_third_refusal_and_legacy_compatibility(self):
         runner = load_runner()
+        from agent_harnesses import artifacts
         protocol = {"version": 4, "rules": ["short answer"], "gold_sentinel_map":
                     {"INSUFFICIENT": "无此项/查无", "forgotten=true": "已停止统计"}}
         with tempfile.TemporaryDirectory() as td:
@@ -268,7 +269,7 @@ class JudgeContractTest(unittest.TestCase):
                 about = {"answer_protocol": protocol}
                 about_path.write_text(json.dumps(about, ensure_ascii=False), encoding="utf-8")
                 rendered = runner.load_protocol(about_path)
-                self.assertIn("short answer", rendered)
+                self.assertEqual(rendered, artifacts.load_benchmark_protocol(Path(td)))
                 self.assertEqual("超出记录时间范围" in rendered, version == 5)
                 self.assertIn("已停统", rendered)
         q = question(capability="L6_refusal", gt=None, question_contract=contract("abstention", abstention_kind="out_of_scope"))

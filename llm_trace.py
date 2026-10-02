@@ -35,7 +35,7 @@ def failure_record(exc, *, secrets=()):
     The existing __error__ sentinel remains available to every original stage.
     """
     metadata = {"version": 1, "error_type": type(exc).__name__}
-    for field in ("kind", "retryable", "attempts", "token_cap", "input_chars", "phase", "call_id",
+    for field in ("kind", "global_stop", "retryable", "attempts", "token_cap", "input_chars", "phase", "call_id",
                   "deadline_s", "local_cleanup_confirmed", "remote_cancellation", "usage_status",
                   "response_received"):
         value = getattr(exc, field, None)

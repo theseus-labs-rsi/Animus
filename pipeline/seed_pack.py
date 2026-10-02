@@ -392,6 +392,80 @@ def core_requirements(pack: dict) -> dict:
     return project(validate_seed_pack(pack))
 
 
+def project_required_blueprint(candidate: dict, pack: dict) -> tuple[dict, list[str]]:
+    """Restore only explicitly curated seed declarations in an uncommitted draft.
+
+    This does not invent business facts or decide where inferred structure
+    belongs. The complete original normalizer and seed validator still run
+    after projection; an incompatible synthetic extension remains an error.
+    """
+    requirements = core_requirements(pack)
+    result = deepcopy(candidate)
+    blueprint = result.get("world_blueprint", result)
+    if not isinstance(blueprint, dict):
+        return result, []
+    changes = []
+
+    def merge_list(actual, required, identity, path):
+        rows = deepcopy(actual) if isinstance(actual, list) else []
+        for item in required:
+            key = tuple(item.get(name) for name in identity)
+            index = next((i for i, row in enumerate(rows) if isinstance(row, dict)
+                          and tuple(row.get(name) for name in identity) == key), None)
+            if index is None:
+                rows.append(deepcopy(item))
+                changes.append(path + ":" + "/".join(map(str, key)) + ":restored")
+            elif any(rows[index].get(name) != value for name, value in item.items()):
+                rows[index] = {**rows[index], **deepcopy(item)}
+                changes.append(path + ":" + "/".join(map(str, key)) + ":canonicalized")
+        return rows
+
+    for group in ("entity_types", "relation_types", "event_types", "causal_rules"):
+        rows = deepcopy(blueprint.get(group)) if isinstance(blueprint.get(group), list) else []
+        by_id = {row.get("id"): i for i, row in enumerate(rows) if isinstance(row, dict)}
+        for required in requirements[group]:
+            identity = required["id"]
+            if identity not in by_id:
+                rows.append(deepcopy(required))
+                changes.append(group + ":" + identity + ":restored")
+                continue
+            row = rows[by_id[identity]]
+            for key, value in required.items():
+                if key == "fields":
+                    row[key] = merge_list(row.get(key), value, ("name",), group + ":" + identity + ".fields")
+                elif key == "effect_fields":
+                    row[key] = merge_list(row.get(key), value, ("role", "field"),
+                                          group + ":" + identity + ".effect_fields")
+                elif key == "relation_bindings":
+                    row[key] = merge_list(row.get(key), value, ("relation", "from_role", "to_role"),
+                                          group + ":" + identity + ".relation_bindings")
+                elif key == "roles":
+                    merged = {**(row.get(key) if isinstance(row.get(key), dict) else {}), **value}
+                    if merged != row.get(key):
+                        row[key] = merged
+                        changes.append(group + ":" + identity + ".roles:canonicalized")
+                else:
+                    projected = (max(row.get(key, 0), value)
+                                 if key in ("count", "min_count") and type(row.get(key)) is int
+                                 and not (key == "count" and required.get("cardinality_policy") == "exact")
+                                 else value)
+                    if row.get(key) != projected:
+                        row[key] = deepcopy(projected)
+                        changes.append(group + ":" + identity + "." + key + ":canonicalized")
+        blueprint[group] = rows
+    channels = list(dict.fromkeys([*(blueprint.get("evidence_channels") or []),
+                                   *requirements["evidence_channels"]]))
+    if channels != blueprint.get("evidence_channels"):
+        blueprint["evidence_channels"] = channels
+        changes.append("evidence_channels:restored")
+    minimum = requirements["temporal_model"]["min_sessions"]
+    temporal = blueprint.get("temporal_model")
+    if isinstance(temporal, dict) and type(temporal.get("n_sessions")) is int and temporal["n_sessions"] < minimum:
+        temporal["n_sessions"] = minimum
+        changes.append("temporal_model.n_sessions:raised_to_seed_minimum")
+    return result, changes
+
+
 def seed_input(pack: dict) -> tuple[str, list[dict]]:
     """Return a CLI-ready scene description and existing-format few-shot docs."""
     pack = validate_seed_pack(pack)

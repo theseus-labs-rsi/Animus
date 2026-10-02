@@ -73,6 +73,42 @@ class ProductionLine(ABC):
     # 关系、事件或 canonical 时间线，仅派生评测证据侧信道的产线，才可显式打开。
     typed_overlay_safe: bool = False
 
+    def requirements(self, seed_schema, quota, policy=None):
+        from pipeline.capability_contract import requirements
+        return requirements(self.id, quota, policy)
+
+    def construction_spec(self):
+        """Conditions owned by the same line that enumerates and grades orders."""
+        return {}
+
+    def construction_issues(self, carrier, blueprint, objects, events, observations):
+        return []
+
+    def planned_observations(self, carrier, blueprint, objects, events, ownership):
+        """Lower capability sampling into schedules; authors still create values."""
+        return []
+
+    def carrier_field_issues(self, carrier, blueprint, objects):
+        fields = {t['id']: {f['name'] for f in t['fields']} for t in blueprint['entity_types']}
+        if carrier.get('field') and any(carrier['field'] not in fields[objects[e]['type']] for e in carrier['entities']):
+            return [{'code': 'undeclared_carrier_field', 'message': 'Use a declared field of the focus objects', 'field': carrier['field']}]
+        return []
+
+    def matches_carrier(self, carrier, entities, support):
+        return (support.get('entity') in entities and
+                (not carrier.get('field') or support.get('field') == carrier['field']))
+
+    def value_issues(self, world, carrier):
+        return []
+
+    def verify_instance(self, world_revision, order):
+        from pipeline.capability_contract import verify_order
+        return verify_order(self, world_revision, order)
+
+    def family_key(self, order):
+        from pipeline.capability_contract import family_key
+        return family_key(order)
+
     # ── 依赖声明:本线产题所需的【世界基质特征】(可代码判定的结构化标签)──
     #   Skill-it 依赖图思想的【忠实落地】:我们是评测生成器、不做在线训练混合,
     #   所以这里不是"按学习速度动态重配权重",而是"每条产线依赖世界里的某种基质特征才能产题"。

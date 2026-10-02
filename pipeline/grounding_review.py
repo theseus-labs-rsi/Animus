@@ -4,7 +4,6 @@ This adapts the existing readers; it never creates a world, question or gold.
 Legacy lexical grounding is retained as a diagnostic, not a semantic veto.
 """
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import threading
 
@@ -25,6 +24,19 @@ def _local_execution_failure(raw):
         "http_protocol_error", "http_read_timeout", "http_write_timeout", "total_deadline",
         "http_status_500", "http_status_502", "http_status_503", "http_status_504",
         "paged_invalid_action", "paged_allowance_exhausted"}
+
+
+def _global_execution_failure(exc):
+    """Return true only when later provider calls must not be admitted.
+
+    Question-bound transport, JSON, paging, context and model-output failures
+    remain local to the current review stage.  The outer bounded runner already
+    owns the hard call/cost fuse; authentication failures cannot recover on a
+    later question either.  Keeping this list narrow prevents one malformed
+    candidate response from suppressing the rest of a large review.
+    """
+    from execution_control import global_failure
+    return global_failure(exc)
 
 
 def enabled(wp):
@@ -53,12 +65,15 @@ def execution_complete(review):
 
 
 def candidates_with_evidence(questions, corpus, *, isolated_reference=False):
-    # Review every document in the declared time scope and every document that
-    # explicitly mentions the questioned entity anywhere in the public history.
-    # The latter keeps retrospective evidence/counterevidence visible.  This is
-    # only a bounded retrieval envelope: the three LLM roles still decide
-    # meaning, support and validity.  Questions without a declared time scope
-    # retain the complete public corpus because absence claims need global view.
+    # Scan the complete public history, then give the semantic roles every
+    # document that explicitly mentions the questioned canonical entity.  The
+    # previous union also included *all* documents in every declared session;
+    # in recurring-entity worlds that inflated one question to hundreds of
+    # mostly unrelated documents and made the paging controller dominate the
+    # review.  Exact entity retrieval is transport only: filler/conflict rows
+    # remain visible and the three LLM roles still decide aliases, meaning,
+    # support, absence and validity.  A machine receipt makes the full-corpus
+    # scan explicit without claiming that an exact-string scan proves absence.
     sessions = _sessions_of(corpus)
     public = [(session.get("session_id"), doc) for session in sessions
               for doc in session.get("docs", []) if doc.get("doc_id")]
@@ -68,8 +83,16 @@ def candidates_with_evidence(questions, corpus, *, isolated_reference=False):
     for question in questions:
         declared = set(question.get("evidence_sessions") or [])
         entity = str(question.get("entity") or "").strip()
-        scoped = [(sid, doc) for sid, doc in public if (not declared or not entity or sid in declared
-                  or (entity and entity in str(doc.get("content") or "")))]
+        if entity:
+            scoped = [(sid, doc) for sid, doc in public
+                      if entity in str(doc.get("content") or "")]
+            scope_kind = "all_canonical_entity_mentions/v2"
+        elif declared:
+            scoped = [(sid, doc) for sid, doc in public if sid in declared]
+            scope_kind = "declared_sessions_without_entity/v2"
+        else:
+            scoped = list(public)
+            scope_kind = "complete_public_corpus_without_entity/v2"
         # Candidate evidence remains signal-only.  The semantic readers also
         # receive filler/distractor documents inside the same bounded scope so
         # they can detect ambiguity and counterevidence.
@@ -82,6 +105,7 @@ def candidates_with_evidence(questions, corpus, *, isolated_reference=False):
             # partial render.  Expanding this one question is safer than either
             # crashing the batch or letting an empty scope pass as complete.
             scope_fallback = True
+            scope_kind = "complete_public_corpus_fallback/v2"
             pool = list(dict.fromkeys(str(doc["doc_id"]) for _, doc in public
                                       if doc.get("is_filler") is not True))
             semantic_pool = list(dict.fromkeys(str(doc["doc_id"]) for _, doc in public))
@@ -93,7 +117,16 @@ def candidates_with_evidence(questions, corpus, *, isolated_reference=False):
         rows.append({**deepcopy(question), "evidence_doc_ids": pool,
                      "candidate_evidence_doc_ids": pool,
                      "semantic_scope_doc_ids": semantic_pool,
-                     "evidence_scope": {"kind": "declared_sessions_plus_entity_mentions/v1",
+                     "semantic_scope_receipt": {
+                         "version": "full-public-exact-entity-scan/v1",
+                         "selection_kind": scope_kind,
+                         "canonical_entity": entity or None,
+                         "scanned_fields": ["content"],
+                         "full_public_document_count": len(public),
+                         "matched_document_count": len(semantic_pool),
+                         "declared_sessions": sorted(declared, key=str),
+                         "semantic_limit": "Exact canonical-name retrieval does not prove semantic absence or exclude aliases."},
+                     "evidence_scope": {"kind": scope_kind,
                                         "declared_sessions": sorted(declared, key=str),
                                         "entity_expansion": bool(entity),
                                         "semantic_document_count": len(semantic_pool),
@@ -300,7 +333,7 @@ def _merge_partition_reviews(candidates, reports):
 
 def review_grounding(questions, corpus, protocol, *, chat_json, model,
                      max_calls=None, max_tokens=4096, max_input_chars=200000, record=None,
-                     isolated_reference=False, checkpoint_dir=None, workers=1):
+                     isolated_reference=False, checkpoint_dir=None, workers=1, cache_namespace=None):
     if type(workers) is not int or not 1 <= workers <= 16:
         raise ValueError("Semantic review workers must be an integer from 1 to 16")
     candidates = candidates_with_evidence(questions, corpus, isolated_reference=isolated_reference)
@@ -322,10 +355,12 @@ def review_grounding(questions, corpus, protocol, *, chat_json, model,
         # remains below paged_read.LIMIT and retains all public documents.
         max_input_chars = max(max_input_chars, len(json.dumps(corpus, ensure_ascii=False)) * 3 + 100000)
     paging_contract = Path(paged_read.__file__).read_text(encoding="utf-8")
-    def cache_key(messages, params, candidate):
-        return fingerprint({"messages": messages, "params": params,
-                            "candidate_id": candidate,
-                            "paging": paging_contract})
+    def cache_key(messages, params, candidate, contract=None):
+        payload = {"messages": messages, "params": params,
+                   "candidate_id": candidate, "paging": paging_contract if contract is None else contract}
+        if cache_namespace is not None:
+            payload["public_input"] = cache_namespace
+        return fingerprint(payload)
     def record_progress(event):
         active.candidate = event.get("candidate_id")
         if record:
@@ -345,11 +380,18 @@ def review_grounding(questions, corpus, protocol, *, chat_json, model,
                 raise RuntimeError("Previous review execution failed; no further provider calls")
         try:
             if cache:
-                path = cache / (cache_key(messages, kwargs, candidate) + ".json")
-                if path.exists():
+                from pipeline import paged_read_v2
+                contracts = [paging_contract, Path(paged_read_v2.__file__).read_text(encoding="utf-8")]
+                for contract in contracts:
+                    path = cache / (cache_key(messages, kwargs, candidate, contract) + ".json")
+                    if not path.exists():
+                        continue
                     value = json.loads(path.read_text(encoding="utf-8"))
                     if value.get("key") != path.stem or value.get("hash") != fingerprint({k:v for k,v in value.items() if k != "hash"}):
                         raise ValueError("Semantic review checkpoint changed")
+                    if contract != paging_contract:
+                        documents = json.loads(messages[-1]["content"]).get("documents", [])
+                        paged_read.validate(value["output"], documents)
                     return deepcopy(value["output"])
             with state_lock:
                 caller_invocations += 1
@@ -363,8 +405,9 @@ def review_grounding(questions, corpus, protocol, *, chat_json, model,
         except paged_read.PagedReadExecutionError as exc:
             if cache and _local_execution_failure(exc.response):
                 return exc.response
-            with state_lock:
-                stopped = True
+            if _global_execution_failure(exc):
+                with state_lock:
+                    stopped = True
             raise
         except paged_read.PagedReadProtocolError as exc:
             # A model that repeatedly emits an invalid paging action makes only
@@ -373,9 +416,10 @@ def review_grounding(questions, corpus, protocol, *, chat_json, model,
             return {"__error__": str(exc),
                     "__error_metadata__": {"kind": exc.kind,
                                              "candidate_id": candidate}}
-        except Exception:
-            with state_lock:
-                stopped = True
+        except Exception as exc:
+            if _global_execution_failure(exc):
+                with state_lock:
+                    stopped = True
             raise
 
     try:
@@ -405,9 +449,8 @@ def review_grounding(questions, corpus, protocol, *, chat_json, model,
                     report.setdefault("audit_error", {
                         "error_type": type(exc).__name__, "message": str(exc)})
                     return report
-            with ThreadPoolExecutor(max_workers=worker_count,
-                                    thread_name_prefix="semantic-question") as pool:
-                reports = list(pool.map(review_shard, range(worker_count)))
+            import config
+            reports = config.pmap(review_shard, range(worker_count), workers=worker_count)
             review = _merge_partition_reviews(candidates, reports)
     except SemanticReviewAuditError as exc:
         # The exception deliberately carries the complete in-memory audit.
@@ -425,9 +468,8 @@ def review_grounding(questions, corpus, protocol, *, chat_json, model,
                   "suppressed_after_failure": suppressed_after_failure,
                   "logical_calls_used": review["calls_used"],
                   "paid_provider_calls": None,
+                  "unit_failure_isolation": "bounded-units/v1",
                   "scope": "Forwarded callable invocations; actual provider attempts and charges require the provider trace/bill."}
-    if cache:
-        accounting["unit_failure_isolation"] = "bounded-units/v1"
     report.update(accounting)
     review["execution_accounting"] = deepcopy(accounting)
     delivery = validate_delivery(candidates, corpus, protocol, review)

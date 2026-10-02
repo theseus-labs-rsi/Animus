@@ -46,7 +46,10 @@ def _read(directory, name):
 def _release_inputs(directory):
     directory = Path(directory)
     names = list(INPUTS)
-    for optional in ("06_semantic_review.json", "03_orders_warning_resolution.json"):
+    for optional in ("06_semantic_review.json", "03_orders_warning_resolution.json",
+                     "01_joint_design_receipt.json", "02_source_supply_gate.json",
+                     "02_world_review_warning.json", "03_capacity_gate.json",
+                     "04_questions_warning.json", "05_corpus_warning.json"):
         if (directory / optional).is_file():
             names.append(optional)
     return tuple(names)
@@ -189,6 +192,16 @@ def evaluate_release(directory) -> dict:
                 "min_questions": minimum,
                 "per_line_missing": missing_by_line,
             })
+        # Candidate continuation preserves material for diagnosis. It never
+        # converts an unresolved upstream review into release certification.
+        for name in ("02_world_review_warning.json", "04_questions_warning.json",
+                     "05_corpus_warning.json"):
+            if (directory / name).is_file():
+                issues.append({"code": "unresolved_generation_review", "artifact": name})
+        for name in ("01_joint_design_receipt.json", "02_source_supply_gate.json",
+                     "03_capacity_gate.json"):
+            if (directory / name).is_file() and _read(directory, name).get("release_eligible") is False:
+                issues.append({"code": "exploratory_generation_only", "artifact": name})
         for status, code in (("pending_review", "questions_pending_review"),
                              ("rejected", "questions_rejected"),
                              ("scoped_excluded", "questions_scoped_excluded")):

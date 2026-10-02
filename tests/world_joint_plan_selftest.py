@@ -52,6 +52,24 @@ class WorldJointPlanTests(unittest.TestCase):
         world = build_world(self.wp, tracer, log=lambda *_: None, draft_out=draft, **kw)
         return world, draft, tracer
 
+    def test_initial_value_error_identifies_real_field_and_preserves_original_rule(self):
+        rows = [{"entity":"Yearbook", "field":"review", "session":0,
+                 "value":{"type":"text", "value":"pending"}}]
+        original = deepcopy(self.table)
+        with self.assertRaises(WorldBlueprintError) as error:
+            joint.apply_initial_states(self.table, {"initial_states":rows}, self.wp["world_blueprint"])
+        self.assertIn("nonempty scalar", str(error.exception))
+        detail = json.loads(str(error.exception).split("; initial_state=", 1)[1])
+        self.assertEqual(detail["entity"], "Yearbook")
+        self.assertEqual(detail["field"], "review")
+        self.assertEqual(detail["received_value"], rows[0]["value"])
+        self.assertEqual(self.table, original)
+        rows[0]["value"] = "pending"
+        entities, saved = joint.apply_initial_states(self.table, {"initial_states":rows}, self.wp["world_blueprint"])
+        self.assertEqual(saved, rows)
+        self.assertEqual(next(e for e in entities if e["name"]=="Yearbook")["fields"]["review"],
+                         {"type":"stable", "value":"pending"})
+
     def test_real_builder_shared_complete_task_calendar_and_no_private_inputs(self):
         contract = self.wp["seed_contract"]
         contract["task"]["instructions"] = ("完整冻结任务\n" * 300).rstrip()

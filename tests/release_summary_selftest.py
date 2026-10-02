@@ -54,7 +54,6 @@ class ReleaseSummaryTests(unittest.TestCase):
 
     def test_mixed_question_outcomes_release_the_passed_subset(self):
         root = self.make_run()
-        (root / "02_world_review_warning.json").write_text("{}", encoding="utf-8")
         result = evaluate_release(root)
         self.assertTrue(result["eligible"], result)
         self.assertEqual(result["status"], "passed")
@@ -62,6 +61,16 @@ class ReleaseSummaryTests(unittest.TestCase):
             "released": 1, "rejected": 1, "pending_review": 1, "scoped_excluded": 0})
         self.assertEqual({row["code"] for row in result["warnings"]}, {
             "delivery_target_unmet", "questions_rejected", "questions_pending_review"})
+
+    def test_unresolved_upstream_review_keeps_partition_but_closes_release(self):
+        root = self.make_run()
+        (root / "02_world_review_warning.json").write_text(
+            json.dumps({"release_eligible": False}), encoding="utf-8")
+        result = evaluate_release(root)
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["checks"]["partition"]["counts"]["released"], 1)
+        self.assertIn({"code": "unresolved_generation_review",
+                       "artifact": "02_world_review_warning.json"}, result["issues"])
 
     def test_scoped_exclusion_is_a_fourth_disjoint_status(self):
         root = self.make_run(scoped=("q4",))

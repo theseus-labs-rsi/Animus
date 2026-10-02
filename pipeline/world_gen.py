@@ -97,7 +97,7 @@ def _repair_changes(before, after):
 
 def build_world(wp, tracer, log=print, existing=None, narrative: bool = False, *,
                 draft_out: dict | None = None, repair_input: dict | None = None,
-                checkpoint_path=None) -> WorldState:
+                checkpoint_path=None, allow_supply_shortfall=False) -> WorldState:
     """Original builder, optionally retaining a bound draft or repairing it once.
 
     Repair input: {draft, feedback, targets: {intrinsic: [{entity, fields}],
@@ -110,7 +110,8 @@ def build_world(wp, tracer, log=print, existing=None, narrative: bool = False, *
     if (wp.get("world_generation") or {}).get("strategy") == "agentic":
         if narrative:
             raise WorldBlueprintError("Agentic business world generation does not support game Story Ledger")
-        return _build_agentic_world(wp, tracer, log, existing, draft_out, repair_input, checkpoint_path)
+        return _build_agentic_world(wp, tracer, log, existing, draft_out, repair_input, checkpoint_path,
+                                   allow_supply_shortfall=allow_supply_shortfall)
     state = None
     if draft_out is not None or repair_input is not None:
         state = {"version": WORLD_DRAFT_VERSION, "wp_hash": _world_digest(wp),
@@ -177,7 +178,8 @@ def build_world(wp, tracer, log=print, existing=None, narrative: bool = False, *
             draft_out.update(saved)
 
 
-def _build_agentic_world(wp, tracer, log, existing, draft_out, repair_input, checkpoint_path):
+def _build_agentic_world(wp, tracer, log, existing, draft_out, repair_input, checkpoint_path,
+                         *, allow_supply_shortfall=False):
     """Use the original compiler, finalization and factory gates after agent authoring."""
     from pipeline.world_agent import generate_world
     from pipeline.world_blueprint import normalize_world_blueprint, WorldBlueprintError
@@ -207,14 +209,31 @@ def _build_agentic_world(wp, tracer, log, existing, draft_out, repair_input, che
             feedback = repair_input.get("feedback")
             if not isinstance(feedback, dict) or not feedback:
                 raise WorldBlueprintError("Agent repair requires the original review feedback")
+            if "targets" in repair_input:
+                original_targets = feedback.get("repair_targets", {})
+                if repair_input["targets"] != {key: original_targets.get(key) for key in ("intrinsic", "structure")}:
+                    raise WorldBlueprintError("Agent repair targets differ from the original review feedback")
             # Saved opinions remain intact in the factory artifact. Repeated full
             # world/prompt envelopes do not belong in the planner's next context.
             feedback = {k: deepcopy(v) for k, v in feedback.items()
                         if k not in {"messages", "input_snapshot", "binding", "previous"}}
             resume = deepcopy(draft.get("agent"))
             state["parent_draft_hash"] = draft["draft_hash"]
+        from pipeline.instance_plan import enabled as instance_enabled
+        def finalization_failure(message, evidence):
+            if instance_enabled(wp):
+                from pipeline.supply_capacity import CapacityReviewRequested
+                raise CapacityReviewRequested({"phase":"business_layout", "findings":[{
+                    "kind":"business", "code":"world_finalization", "message":message,
+                    "affected_ids":[], "evidence":evidence,
+                    "allowed_edit_scope":"uncommitted_plan_with_original_seed_and_limits"}]})
+            raise WorldBlueprintError(message + ": " + json.dumps(evidence, ensure_ascii=False))
+        repair_options = ({"repair_max_calls":repair_input.get("max_calls", 4)}
+                           if repair_input is not None and instance_enabled(wp) else {})
+        if allow_supply_shortfall:
+            repair_options["allow_supply_shortfall"] = True
         table, agent = generate_world(wp, tracer, existing=existing,
-            checkpoint_path=checkpoint_path, feedback=feedback, resume_state=resume, log=log)
+            checkpoint_path=checkpoint_path, feedback=feedback, resume_state=resume, log=log, **repair_options)
         state.update(merged=deepcopy(table), raw_merged=deepcopy(table), agent=deepcopy(agent),
                      initial_states=deepcopy(agent.get("initial_states", [])))
         if feedback is not None:
@@ -225,7 +244,7 @@ def _build_agentic_world(wp, tracer, log, existing, draft_out, repair_input, che
         world, issues = assemble_world(table, blueprint=blueprint, existing=existing,
                                       include_shape_diagnostics=False)
         if issues:
-            raise WorldBlueprintError("Agent world has unresolved compiler errors: " + "; ".join(issues))
+            finalization_failure("Agent world has unresolved compiler errors", {"compiler_issues":issues})
         profile = deepcopy(wp.get("domain_profile") or {})
         fields = {}
         for item in blueprint["entity_types"]:
@@ -248,9 +267,11 @@ def _build_agentic_world(wp, tracer, log, existing, draft_out, repair_input, che
             blocking.extend(_blocking_world_defects(validate(typed_world, table, typed_profile), False,
                              protected_fields=protected, entity_types=world.entity_types))
         if blocking:
-            raise WorldBlueprintError("Agent world has unresolved truth defects: "
-                                      + json.dumps(blocking, ensure_ascii=False))
-        world = _finish_world(wp, world, table, profile, blueprint, False, protected, log)
+            finalization_failure("Agent world has unresolved truth defects", {"compiler_issues":blocking})
+        try:
+            world = _finish_world(wp, world, table, profile, blueprint, False, protected, log)
+        except WorldBlueprintError as error:
+            finalization_failure("World finalization rejected the authored facts", {"compiler_issues":[str(error)]})
         state.update(status="completed", candidate_world=deepcopy(world.to_dict()),
                      candidate_world_hash=_world_digest(world.to_dict()))
         return world
@@ -723,8 +744,8 @@ def _world_system(profile: dict, type_id: str, time_unit: str, open_schema: bool
                   identity_policy=identity_policy)
 
 
-def _finish_world(wp, ws, merged, profile, blueprint, narrative, protected_fields, log):
-    """Original deterministic finalization, also used for zero-call draft replay."""
+def _prepare_final_structure(wp, ws, profile, blueprint, log):
+    """Apply the deterministic structure used by final worlds and supply previews."""
     typed_contract = not blueprint.get("legacy_adapter", False)
     if typed_contract:
         active_l7 = any(str(item.get("line") or "").strip().lower().startswith("l7")
@@ -736,6 +757,28 @@ def _finish_world(wp, ws, merged, profile, blueprint, narrative, protected_field
     else:
         _affix_units(ws, profile, log)
         imprint_structure(ws, log, profile)
+
+
+def preview_supply_structure(wp, ws, log=lambda *args: None):
+    """Prepare an isolated draft exactly as finalization prepares its structure."""
+    from pipeline.world_blueprint import normalize_world_blueprint
+
+    blueprint = normalize_world_blueprint(wp)
+    profile = dict(wp.get("domain_profile") or {})
+    projected_fields = {}
+    for entity_type in blueprint["entity_types"]:
+        for field in entity_type.get("fields") or []:
+            projected_fields.setdefault(field.get("name"), dict(field))
+    profile["field_schema"] = list(projected_fields.values())
+    if seed_world_prompt(wp):
+        profile["seed_protected_fields"] = sorted(seed_protected_fields(wp))
+    _prepare_final_structure(wp, ws, profile, blueprint, log)
+    return ws
+
+
+def _finish_world(wp, ws, merged, profile, blueprint, narrative, protected_fields, log):
+    """Original deterministic finalization, also used for zero-call draft replay."""
+    _prepare_final_structure(wp, ws, profile, blueprint, log)
     validate_seed_world(wp, ws)
     final_checks = validate(ws, merged, profile)
     blocking = _blocking_world_defects(final_checks, narrative,

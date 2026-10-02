@@ -212,11 +212,28 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(manifest['algo']['grounding']['n_pending'], 2)
         self.assertEqual(manifest['algo']['met_status'], 'MET')
 
-    def test_provider_failure_stops_calls_and_keeps_prior_certified_subset(self):
+    def test_question_bound_provider_failure_does_not_suppress_later_candidates(self):
         kept, report, review, script = self.run_review({1: 'provider'})
-        self.assertEqual(len(kept), 1); self.assertTrue(report['execution_stopped'])
-        self.assertEqual(len(script.calls), 4)
-        self.assertFalse(report['delivery_safe']); self.assertTrue(self.release(kept, review)['eligible'])
+        self.assertEqual(len(kept), 4); self.assertFalse(report['execution_stopped'])
+        self.assertEqual(len(script.calls), 15)
+        self.assertTrue(report['delivery_safe']); self.assertTrue(self.release(kept, review)['eligible'])
+
+    def test_hard_budget_failure_still_stops_later_provider_calls(self):
+        class HardBudget(Script):
+            def __call__(self, step, messages, **params):
+                if step.endswith('blind_read') and self.index == 0:
+                    self.calls.append(step)
+                    self.index += 1
+                    raise RuntimeError(
+                        'Original experiment model/call/estimated budget limit; no provider dispatch')
+                return super().__call__(step, messages, **params)
+        script = HardBudget()
+        kept, report, _ = gr.review_grounding(
+            self.questions, self.corpus, self.protocol, chat_json=script,
+            model='test', isolated_reference=True)
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(report['execution_stopped'])
+        self.assertGreater(report['suppressed_after_failure'], 0)
 
     def test_global_audit_failure_cannot_deliver(self):
         _, _, review, _ = self.run_review({1: 'audit_format'})

@@ -13,6 +13,7 @@ import json
 import tempfile
 import time
 import unittest
+from cli_fixture import write_cli
 from dataclasses import replace
 from pathlib import Path
 
@@ -28,20 +29,13 @@ from agent_harnesses.execution import execute_many
 from agent_harnesses.planning import make_plans
 from agent_harnesses.runners.native_cli import run
 
-# 离线测试夹具，见 fixtures/README.md。
+# 测试夹具：office 历史候选快照(filtered, UNMET)，见 fixtures/README.md。
 OFFICE_FILTERED = Path(__file__).resolve().parent / "fixtures" / "office__20260902-121616"
 
 
 def _fake_sleepy_claude(path: Path, seconds: int) -> Path:
-    """一个「睡 N 秒再回答」的假 claude：答案带自己的 pid，用来验证每题独立进程。"""
-    path.write_text(
-        "#!/bin/sh\n"
-        f"sleep {seconds}\n"
-        'printf \'%s\\n\' "{\\"result\\":\\"ans-$$\\"}"\n',
-        encoding="utf-8",
-    )
-    path.chmod(0o755)
-    return path
+    return write_cli(path, "import json, os, time\n" + f"time.sleep({seconds})\n" +
+                     "print(json.dumps({'result': 'ans-' + str(os.getpid())}))\n")
 
 
 def _claude_plan(out: Path, env_file: Path, parallel: int) -> Path:
@@ -197,9 +191,7 @@ class QuestionParallelismTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             working = _fake_sleepy_claude(root / "ok-claude", 0)
-            failing = root / "fail-claude"
-            failing.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-            failing.chmod(0o755)
+            failing = write_cli(root / "fail-claude", "import sys\nsys.exit(1)\n")
             env_file = _write_claude_env(root, failing)
             out = root / "out"
             out.mkdir()

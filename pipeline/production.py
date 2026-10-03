@@ -125,13 +125,27 @@ def observe_budget(run, state):
     state["generation_budget"] = current
 
 
+def _corpus_status(report):
+    """Read the token receipt under its declared delivery-report version."""
+    if report.get("version") == 2:
+        return bool(report.get("corpus_current")), report.get("corpus_target") or {}
+    corpus = report.get("corpus_target") or {}
+    return bool(corpus.get("current")), corpus.get("measurement") or {}
+
+
 def outcome(run, *, selected=False):
     """Read the registered quality/selection receipts, preserving all denominators."""
     from pipeline.supply import write_delivery_report
     report = write_delivery_report(run)
     plan = run.read("01_whitepaper.json")["supply_plan"]
-    field = "final_selected" if selected else "released"
-    counts = {row["line"]: row["primary"][field] for row in report["by_line"]}
+    generation_only = report.get("version") == 2
+    if generation_only:
+        if selected:
+            raise ValueError("V2 delivery targets count generation candidates, not four-model selection")
+        counts = {line: row["formed_candidates"] for line, row in report["by_line"].items()}
+    else:
+        field = "final_selected" if selected else "released"
+        counts = {row["line"]: row["primary"][field] for row in report["by_line"]}
     deficits = {line: goal - (counts.get(line) or 0) for line, goal in plan["final_allocation"].items()
                 if (counts.get(line) or 0) < goal}
     # Count native trends only after their original qids survive the current
@@ -180,6 +194,7 @@ def outcome(run, *, selected=False):
             stages = row.get("stage_execution") or {}
             if any(isinstance(value, dict) and value.get("status") == "model_error" for value in stages.values()):
                 execution_errors.append(row.get("source_qid", row.get("qid")))
+    corpus_current, measurement = _corpus_status(report)
     return {"count_stage": "selection_complete" if selected else "generation_quality",
             "counts": counts, "deficits": deficits, "report": report, "native_trend": native,
             "review_execution_errors": execution_errors,
@@ -188,17 +203,20 @@ def outcome(run, *, selected=False):
                           run.read("03_capacity_gate.json").get("passed") is False)
                  and not (run.has("02_source_supply_gate.json") and
                           run.read("02_source_supply_gate.json").get("release_eligible") is False)
-                and report["corpus_target"]["current"]
-                and (report["corpus_target"].get("measurement") or {}).get("target_met")
+                 and corpus_current and measurement.get("target_met")
+                 and (not generation_only or report["candidate_target_met"])
                 and (not selected or report["selection_complete"]))}
 
 
 def next_reserve(plan, result):
     """Use observed survival for each deficient line; retain the other reserves."""
     allocation = deepcopy(plan["candidate_allocation"])
-    rows = {row["line"]: row["primary"] for row in result["report"]["by_line"]}
+    report = result["report"]
+    generation_only = report.get("version") == 2
+    rows = (report["by_line"] if generation_only else
+            {row["line"]: row["primary"] for row in report["by_line"]})
     for line, missing in result["deficits"].items():
-        observed = rows[line]["effective_orders"] or 0
+        observed = rows[line]["orders" if generation_only else "effective_orders"] or 0
         retained = result["counts"].get(line) or 0
         if retained == 0:
             raise ValueError("Zero observed survival requires a line-design diagnosis: " + line)
@@ -408,9 +426,14 @@ def _produce(run, *, to_stage=None, force=False):
     from pipeline.factory import STAGES, generation_stages
     from pipeline.calibration import production_calibration_support
     cfg = run.manifest["config"]
+    generation_only = (cfg.get("delivery_target") or {}).get("version") == 2
+    if generation_only and cfg.get("calibration"):
+        raise ValueError("V2 delivery targets end at generation quality; four-model selection requires a V1 target")
     if cfg.get("acceptance_scope"):
         from pipeline.delivery_target import AcceptanceScope
-        AcceptanceScope.from_dict(cfg["acceptance_scope"])
+        scope = AcceptanceScope.from_dict(cfg["acceptance_scope"])
+        if generation_only and scope.count_stage != "generation_quality":
+            raise ValueError("Frozen V2 acceptance scope must be generation_quality; use an explicitly migrated or new run")
     if cfg.get("calibration"):
         production_calibration_support(cfg["calibration"], cfg["production_control"])
     identity = frozen_identity(run)
@@ -444,8 +467,12 @@ def _produce(run, *, to_stage=None, force=False):
     save_state(run, state)
     names = [stage.name for stage in stages]
     boundary = to_stage or names[-1]
+    if generation_only and to_stage is None:
+        boundary = "quality"
     if boundary not in names:
         raise ValueError("Unknown production stop stage: " + boundary)
+    if generation_only and names.index(boundary) > names.index("quality"):
+        raise ValueError("V2 delivery targets end at generation quality")
     try:
         drive(run, STAGES, to_stage=boundary if boundary in ("input", "whitepaper") else "whitepaper", force=force)
         if boundary in ("input", "whitepaper"):
@@ -507,11 +534,12 @@ def _produce(run, *, to_stage=None, force=False):
                 state.update(status="review_recovery_required", result=result)
                 save_state(run, state)
                 return state
-            if not result["report"]["quality_eligible"] or not result["report"]["corpus_target"]["current"]:
+            corpus_current, measurement = _corpus_status(result["report"])
+            if not result["report"]["quality_eligible"] or not corpus_current:
                 state.update(status="review_recovery_required", result=result)
                 save_state(run, state)
                 return state
-            if not (result["report"]["corpus_target"].get("measurement") or {}).get("target_met"):
+            if not measurement.get("target_met"):
                 state.update(status="design_diagnosis_required", reason="Corpus token contract unmet", result=result)
                 save_state(run, state)
                 return state
@@ -528,7 +556,8 @@ def _produce(run, *, to_stage=None, force=False):
                     save_state(run, state)
                     return state
             if result["passed"]:
-                state.update(status="delivered" if result["count_stage"] == "selection_complete" else
+                state.update(status="generation_complete" if generation_only else
+                             "delivered" if result["count_stage"] == "selection_complete" else
                              "generation_ready_awaiting_selection", result=result)
                 save_state(run, state)
                 return state

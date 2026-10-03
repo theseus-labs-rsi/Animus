@@ -170,6 +170,17 @@ class ProductionTransactionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             production.next_reserve(plan, self.result(l7=0))
 
+    def test_generation_candidate_losses_increase_only_the_deficient_line(self):
+        plan = self.run.read("01_whitepaper.json")["supply_plan"]
+        result = {"counts": {"L1_timeline": 2, "L7_consolidation": 1},
+            "deficits": {"L7_consolidation": 1}, "report": {"version": 2, "by_line": {
+                "L1_timeline": {"orders": 3, "formed_candidates": 2},
+                "L7_consolidation": {"orders": 3, "formed_candidates": 1}}}}
+        self.assertEqual(production.next_reserve(plan, result), {"L1_timeline": 3, "L7_consolidation": 6})
+        result["counts"]["L7_consolidation"] = 0
+        with self.assertRaisesRegex(ValueError, "Zero observed survival"):
+            production.next_reserve(plan, result)
+
     def test_accepted_capacity_revision_retires_the_previous_resume_binding(self):
         name = "02_world_agent_parent.json"
         self.run.write(name, {"old_world": True})

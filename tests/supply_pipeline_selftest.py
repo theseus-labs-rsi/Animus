@@ -142,7 +142,21 @@ class SupplyPipelineTests(unittest.TestCase):
         self.assertEqual(report["candidate_count"], 2)
         self.assertEqual(report["grounded_count"], 1)
         self.assertTrue(report["candidate_target_met"])
+        self.assertTrue(report["delivery_target_met"])
         self.assertEqual(report["selection_scope"], "not_run")
+        run.artifacts["05_corpus_token_scale.json"] = {"target_met": False}
+        with patch("pipeline.quality.quality_snapshot", return_value={"eligible": True}), \
+             patch("pipeline.factory._corpus_is_current", return_value=True):
+            report = supply.write_delivery_report(run)
+            self.assertTrue(report["candidate_target_met"])
+            self.assertFalse(report["delivery_target_met"])
+        run.artifacts["05_corpus_token_scale.json"] = {"target_met": True}
+        with patch("pipeline.quality.quality_snapshot", return_value={"eligible": True}), \
+             patch("pipeline.factory._corpus_is_current", return_value=False):
+            self.assertFalse(supply.write_delivery_report(run)["delivery_target_met"])
+        with patch("pipeline.quality.quality_snapshot", return_value={"eligible": False}), \
+             patch("pipeline.factory._corpus_is_current", return_value=True):
+            self.assertFalse(supply.write_delivery_report(run)["delivery_target_met"])
         run.artifacts["03_capacity_gate.json"] = {"passed": False}
         with patch("pipeline.quality.quality_snapshot", return_value={"eligible": True}), \
              patch("pipeline.factory._corpus_is_current", return_value=True):

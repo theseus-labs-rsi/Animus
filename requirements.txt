@@ -121,7 +121,7 @@ typing-inspection
 typing_extensions
 urllib3
 uvicorn
-uvloop
+uvloop; sys_platform != "win32"
 virtualenv
 watchfiles
 websocket-client

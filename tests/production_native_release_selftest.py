@@ -71,12 +71,16 @@ def question(qid, *, native=False, planted=False, entity=None):
 
 
 class NativeReleaseTests(unittest.TestCase):
-    def make_run(self, rows=None, *, released=("compare-a", "compare-b"), rejected=("native",), pending=()):
+    def make_run(self, rows=None, *, released=("compare-a", "compare-b"), rejected=("native",), pending=(), generation=False):
         folder = tempfile.TemporaryDirectory(prefix="native-release-")
         self.addCleanup(folder.cleanup)
         target = {"version": 1, "final_questions": 2, "count_stage": "selection_complete",
                   "requested_lines": [L7], "per_line_min": {L7: 2}, "per_line_max": {L7: 2},
                   "corpus_tokens": 4000, "tokenizer": "cl100k_base@0.12.0", "max_supply_rounds": 1}
+        if generation:
+            target = {"version": 2, "candidate_questions": 3, "count_stage": "generation_quality",
+                "requested_lines": [L7], "corpus_tokens": 4000, "core_tokens": 4000,
+                "filler_ratio": 0, "tokenizer": "cl100k_base@0.12.0", "max_supply_rounds": 1}
         run = FileRun(Path(folder.name), target)
         rows = rows or [question("compare-a"), question("compare-b"), question("native", native=True)]
         plan = author_brief(target, 6)
@@ -94,6 +98,8 @@ class NativeReleaseTests(unittest.TestCase):
                                               "admitted_calls": 11, "budget_consumed_cny": 0.13}}
         for name, value in values.items():
             run.write(name, value)
+        if generation:
+            run.write("03_capacity_gate.json", {"passed": True})
         run.write("07_release.json", evaluate_release(run.dir))
         self.assertTrue(quality_snapshot(run.dir)["eligible"])
         return run
@@ -117,6 +123,20 @@ class NativeReleaseTests(unittest.TestCase):
         result = self.outcome(self.make_run(rejected=(), pending=("native",)))
         self.assertFalse(result["passed"])
         self.assertEqual(result["native_trend"]["actual"], 0)
+
+    def test_generation_counts_all_candidates_but_requires_a_quality_native_trend(self):
+        run = self.make_run(generation=True)
+        result = self.outcome(run)
+        self.assertEqual(result["counts"], {L7: 3})
+        self.assertTrue(result["report"]["candidate_target_met"])
+        self.assertEqual(result["report"]["grounded_count"], 2)
+        self.assertEqual(result["native_trend"]["actual"], 0)
+        self.assertFalse(result["passed"])
+        result = self.outcome(self.make_run(generation=True, released=("compare-a", "native"), rejected=("compare-b",)))
+        self.assertTrue(result["passed"], result)
+        self.assertEqual(result["native_trend"]["qids"], ["native"])
+        with self.assertRaisesRegex(ValueError, "not four-model selection"):
+            self.outcome(run, selected=True)
 
     def test_released_native_and_comparison_satisfy_both_contracts(self):
         result = self.outcome(self.make_run(released=("compare-a", "native"), rejected=("compare-b",)))

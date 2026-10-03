@@ -157,7 +157,30 @@ npm install --global @openai/codex@0.153.2 @deepseek-ai/dsh@0.1.2-rc.1
 
 语料 token 按文档正文、指定 tokenizer 和固定版本计数。上例的 `--haystack-ratio 9` 仍按字符指定草堆与其余正文至少 9:1；旧参数 `--target-mchars`（兼容别名 `--target-mtokens`）也按字符计量，不能与 `--delivery-target` 混用。
 
-V2 生成目标使用 `candidate_questions`、`core_tokens` 和 `filler_ratio`，在四模型筛选前计数，并以 token 约束正式材料和草堆规模。当前生产控制器尚未适配 V2 的收尾报表，运行到质量阶段后会触发 `TypeError`。
+只生成语料和候选题时，使用 V2 目标。例如，下面的目标要求七线均分 200 道候选题，正式材料至少 10 万 token、总语料至少 100 万 token，草堆与正式材料的 token 比至少 9:1。白皮书根据这些目标设计世界规模和供给结构。
+
+```json
+{
+  "version": 2,
+  "count_stage": "generation_quality",
+  "candidate_questions": 200,
+  "requested_lines": [
+    "L1_timeline", "L2_relational", "L3_process", "L5_conflict",
+    "L6_refusal", "L7_consolidation", "L8_transition"
+  ],
+  "core_tokens": 100000,
+  "corpus_tokens": 1000000,
+  "filler_ratio": 9,
+  "tokenizer": "cl100k_base@0.12.0",
+  "max_supply_rounds": 3
+}
+```
+
+```powershell
+.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --seed-pack path/to/seed.json --delivery-target path/to/target.json --process-questions --semantic-workers 4
+```
+
+V2 默认运行到 `quality`，按 `04_questions.json` 中各线候选题计数；接地后的题量、质量资格和 L7 原生趋势分别验收。候选配额、语料实测和质量要求满足后，生产状态为 `generation_complete`；审查降级保留产物和警告。V2 不运行四模型筛选，CLI 会拒绝与 `--release` 或筛选阶段参数组合。需要筛后题量目标时使用 V1。
 
 `LLM_CONCURRENCY` 限制实际在途模型请求，`--semantic-workers` 控制逐题语义审阅并行数（1–16）。单次请求的总截止和 HTTP 读取超时可在 `.env` 中设置 `LLM_DEADLINE_S`、`LLM_HTTP_READ_TIMEOUT_S`。完整参数见 `python -m pipeline.factory --help`。
 
@@ -169,7 +192,7 @@ V2 生成目标使用 `candidate_questions`、`core_tokens` 和 `filler_ratio`�
 
 续跑沿用 run 中冻结的 seed、目标和已完成阶段；阶段内检查点须通过输入及实现校验才会复用。改变 seed 或交付目标需新建 run。生产状态若为 `review_recovery_required`、`design_diagnosis_required` 或 `round_limit`，需先处理记录的原因再恢复。
 
-已有完整生成结果时，补做试答与筛选：
+已有 V1 完整生成结果时，补做试答与筛选：
 
 ```powershell
 .\venv\Scripts\python.exe -X utf8 -m pipeline.factory --run <run_id> --release --from quality

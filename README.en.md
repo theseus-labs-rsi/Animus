@@ -159,7 +159,30 @@ The pipeline plans supply by line, generates the world, disclosure schedule, and
 
 Corpus tokens are counted from document bodies with the named tokenizer and pinned version. The example's `--haystack-ratio 9` still sets a character ratio of at least 9:1 between haystack and other body text. The legacy `--target-mchars` flag, including its compatibility alias `--target-mtokens`, also measures characters and cannot be combined with `--delivery-target`.
 
-V2 generation targets use `candidate_questions`, `core_tokens`, and `filler_ratio` to count candidates before four-model selection and constrain formal documents and haystack by tokens. The production controller currently has an incompatible V2 summary interface and raises `TypeError` after the quality stage.
+Use a V2 target to generate corpus material and candidate questions only. For example, this target evenly allocates 200 candidates across seven lines and requires at least 100,000 formal-document tokens, at least one million total corpus tokens, and a haystack-to-formal token ratio of at least 9:1. The whitepaper uses these targets to design world size and supply structure.
+
+```json
+{
+  "version": 2,
+  "count_stage": "generation_quality",
+  "candidate_questions": 200,
+  "requested_lines": [
+    "L1_timeline", "L2_relational", "L3_process", "L5_conflict",
+    "L6_refusal", "L7_consolidation", "L8_transition"
+  ],
+  "core_tokens": 100000,
+  "corpus_tokens": 1000000,
+  "filler_ratio": 9,
+  "tokenizer": "cl100k_base@0.12.0",
+  "max_supply_rounds": 3
+}
+```
+
+```powershell
+.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --seed-pack path/to/seed.json --delivery-target path/to/target.json --process-questions --semantic-workers 4
+```
+
+V2 stops at `quality` by default and counts candidates by line in `04_questions.json`. Grounded question counts, quality eligibility, and native L7 trends are checked separately. When candidate quotas, measured corpus targets, and quality requirements are met, production status is `generation_complete`; review downgrades retain artifacts and warnings. V2 does not run four-model selection: the CLI rejects `--release` and selection-stage options with this target. Use V1 for a question target after selection.
 
 `LLM_CONCURRENCY` limits model requests in flight; `--semantic-workers` controls question review parallelism (1–16). Set `LLM_DEADLINE_S` and `LLM_HTTP_READ_TIMEOUT_S` in `.env` to control each request's total deadline and HTTP read timeout. See `python -m pipeline.factory --help` for all options.
 
@@ -171,7 +194,7 @@ V2 generation targets use `candidate_questions`, `core_tokens`, and `filler_rati
 
 Resuming uses the run's frozen seed, target, and completed stages. Checkpoints within a stage are reused after input and implementation checks. Use a new run to change the seed or delivery target. Production states such as `review_recovery_required`, `design_diagnosis_required`, or `round_limit` require resolving the recorded cause before recovery.
 
-For a completed generation run, add model evaluation and selection:
+For a completed V1 generation run, add model evaluation and selection:
 
 ```powershell
 .\venv\Scripts\python.exe -X utf8 -m pipeline.factory --run <run_id> --release --from quality

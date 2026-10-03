@@ -770,6 +770,63 @@ def _recoverable_current_world_review(run: Run, wp, ws, task):
     return None
 
 
+def _disclosure_source_supply_bundle(run, wp, ws, review, warning):
+    """Recheck v6 supply when publication recovery changes its bound world."""
+    if (run.manifest.get("config", {}).get("production_control") or {}).get("version") != "supply-driven/v6":
+        return {}
+    from pipeline.capability_contract import digest
+    previous = run.read("02_source_supply_gate.json")
+    if (previous.get("world_hash") == digest(ws.to_dict())
+            and previous.get("business_review_hash") == digest(review)
+            and previous.get("world_review_warning_hash") == (digest(warning) if warning else None)):
+        return {}
+    # Validate the old receipt before using its accepted unit identities. A new
+    # publication schedule cannot authorize a changed paper or an unbound gate.
+    _require_v6_supply_gate(run, wp, run.read(ART["world"]))
+    from pipeline.joint_design import MAX_REVISIONS, exploratory_after_limit
+    exploratory = exploratory_after_limit(run, wp)
+    exhausted = run.read("01_joint_design_audit.json").get("used_revisions", 0) >= MAX_REVISIONS
+    design = run.read("01_joint_design_receipt.json")
+    proof = None
+    if wp.get("business_instance_plan"):
+        from pipeline.instance_plan import fulfillment
+        old_proof = run.read("02_instance_fulfillment.json")
+        progress = old_proof.get("progress") or {}
+        if (old_proof.get("plan_hash") != wp["business_instance_plan"].get("plan_hash")
+                or not isinstance(progress.get("slot_mapping"), dict)
+                or not isinstance(progress.get("completed_units"), list)):
+            raise ValueError("Public disclosure recovery lacks the original accepted instance identities")
+        # fulfillment consumes these original completion and identity records;
+        # it recomputes every carrier and independent candidate from the world.
+        state = {"identity_registry": deepcopy(progress["slot_mapping"]),
+                 "units": [{"instance_units": deepcopy(progress["completed_units"])}]}
+        proof = fulfillment(wp, ws, state)
+        if not proof["passed"] and not (exploratory or exhausted or warning is not None):
+            from pipeline.supply_capacity import CapacityReviewRequested
+            raise CapacityReviewRequested({"phase": "public_disclosure_supply_refresh",
+                                           "instance_fulfillment": proof})
+    elif not exploratory:
+        raise ValueError("Public disclosure recovery requires its original executable instance plan")
+    degraded = (exploratory or design.get("release_eligible") is False
+                or warning is not None or proof is None or not proof["passed"])
+    gate = {"version": "source-supply-ready/v1",
+            "status": "exploratory_source_observed" if degraded else "source_supply_ready",
+            "whitepaper_hash": digest(wp), "world_hash": digest(ws.to_dict()),
+            "seed_world_audit_hash": digest(validate_seed_world(wp, ws)),
+            "business_review_hash": digest(review),
+            "actual_supply_hash": digest(proof) if proof is not None else None,
+            "per_line": proof.get("actual_supply", {}) if proof else {},
+            "native_trend": proof.get("native_trend", {}) if proof else {},
+            "scope": previous.get("scope", "Original supply rechecked after public disclosure recovery")}
+    if degraded:
+        gate.update(release_eligible=False,
+                    unresolved_design_findings=deepcopy(design.get("unresolved_findings", [])),
+                    world_review_warning=warning is not None,
+                    world_review_warning_hash=digest(warning) if warning is not None else None)
+    return {"02_source_supply_gate.json": gate,
+            **({"02_instance_fulfillment.json": proof} if proof is not None else {})}
+
+
 def stage_disclosure(run: Run):
     """Complete or validate public disclosure without regenerating the frozen world.
 
@@ -850,7 +907,7 @@ def stage_disclosure(run: Run):
     # then receives one fresh independent review.  It never reauthors the world,
     # the full disclosure plan, questions, or corpus, and never loops.
     semantic_repair = None
-    if ((review.get("repair_targets") or {}).get("disclosure") is True
+    if (not review_current and (review.get("repair_targets") or {}).get("disclosure") is True
             and (ws.disclosure or {}).get("strategy") in
             {"direct-disclosure/v1", "direct-disclosure/v2"}):
         from pipeline import disclosure_batches
@@ -894,6 +951,7 @@ def stage_disclosure(run: Run):
                "release_eligible": warning is None}
     bundle = {ART["world"]: ws.to_dict(), ART["disclosure"]: receipt,
               world_semantics.REVIEW_ARTIFACT: review}
+    bundle.update(_disclosure_source_supply_bundle(run, wp, ws, review, warning))
     remove = []
     if warning is None:
         remove.append(world_semantics.WARNING_ARTIFACT)
@@ -2092,6 +2150,17 @@ def main():
     manifest_path = RUNS_DIR / run_id / "manifest.json"
     previous_config = json.loads(manifest_path.read_text(encoding="utf-8")).get("config", {}) if manifest_path.exists() else {}
     effective_delivery = cfg.get("delivery_target") or previous_config.get("delivery_target")
+    if effective_delivery and effective_delivery.get("version") == 2:
+        if ((previous_config.get("acceptance_scope") or {}).get("count_stage")
+                not in (None, "generation_quality")):
+            ap.error("Frozen V2 acceptance scope must be generation_quality; use an explicitly migrated or new run")
+        if (cfg.get("calibration") or previous_config.get("calibration") or
+                any(stage in ("calibration", "selection") for stage in
+                    (a.from_stage, a.to_stage, a.only))):
+            ap.error("V2 delivery targets end at generation quality; four-model selection requires a V1 target")
+        if a.to_stage is None:
+            a.to_stage = "quality"
+            cfg["to"] = "quality"
     if effective_delivery:
         if a.min_questions is not None or a.per_line or a.target_mtokens is not None:
             ap.error("Delivery mode uses its frozen token target and candidate budget; legacy quantity flags require a separate run")
@@ -2146,7 +2215,8 @@ def main():
         if not effective_delivery["requested_lines"]:
             ap.error("Supply-driven production requires explicit requested_lines in the delivery target")
         cfg["production_control"] = {"version": "supply-driven/v6"}
-        cfg["acceptance_scope"] = {"version":1,"count_stage":"generation_quality" if a.to_stage == "quality" else "selection_complete"}
+        cfg["acceptance_scope"] = {"version":1,"count_stage":"generation_quality" if
+            effective_delivery.get("version") == 2 or a.to_stage == "quality" else "selection_complete"}
     if previous_config.get("cumulative_recovery") is not None and (
             a.force or a.only is not None or a.from_stage is not None):
         ap.error("Cumulative recovery must enter its dedicated post-corpus world review first")

@@ -117,9 +117,11 @@ class Tests(unittest.TestCase):
         def loop(*args, **kwargs):
             calls[0] += 1
             return {"action": "index", "offset": 0}
-        with self.assertRaisesRegex(ValueError, "no cumulative progress"):
+        with self.assertRaisesRegex(ValueError, "Repeated invalid paged reader actions.*return finish"):
             paged_read.call("semantic_review.blind_read", messages, chat_json=loop)
         self.assertGreater(calls[0], 4)
+        # Full original pages are delivered first, then four invalid actions stop.
+        self.assertLessEqual(calls[0], 12)
 
     def test_process_author_repeated_directory_actions_are_bounded(self):
         wp, ws, _ = process_fixture()
@@ -335,6 +337,135 @@ class Tests(unittest.TestCase):
         self.assertNotIn("--seed-pack", command)
         self.assertEqual(plan["reuse_source"]["directory"], str(source.resolve()))
         self.assertEqual(batch.validate(directory), plan)
+
+
+
+from contextlib import nullcontext
+from pipeline import production, supply, factory
+GENERATION_LINE = "L1_timeline"
+
+class GenerationContractRun:
+    def __init__(self, folder):
+        self.dir = Path(folder)
+        self.run_id = "offline-generation-contract"
+        self.manifest = {"config": {"delivery_target": {
+            "version": 2, "count_stage": "generation_quality", "candidate_questions": 4,
+            "requested_lines": [GENERATION_LINE], "corpus_tokens": 1000, "core_tokens": 100,
+            "filler_ratio": 9, "tokenizer": "cl100k_base@0.12.0", "max_supply_rounds": 1}}}
+        rows = [{"qid": "q" + str(i), "line": GENERATION_LINE} for i in range(4)]
+        self.values = {"01_whitepaper.json": {"supply_plan": {
+            "final_allocation": {GENERATION_LINE: 4}, "candidate_allocation": {GENERATION_LINE: 4}}},
+            "03_orders.json": rows, "04_questions.json": rows,
+            "06_grounded_questions.json": rows[:2], "07_release.json": {},
+            "03_capacity_gate.json": {"passed": True},
+            "05_corpus_token_scale.json": {"target_met": True}}
+
+    def read(self, name): return deepcopy(self.values[name])
+    def has(self, name): return name in self.values
+    def write(self, name, value): self.values[name] = deepcopy(value)
+    def stage_write_lock(self, name, **kwargs): return nullcontext()
+    def _reload_manifest_for_stage(self): pass
+    def is_done(self, name): return self.manifest["stages"][name]["done"]
+    def set_status(self, value): self.manifest["status"] = value
+    def log(self, message): pass
+
+class GenerationDeliveryContractTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.run = GenerationContractRun(folder.name)
+        for obj, name, value in ((factory, "_corpus_is_current", True),):
+            p = patch.object(obj, name, return_value=value);p.start();self.addCleanup(p.stop)
+        self.release = {"eligible": False}
+        p = patch("pipeline.quality.quality_snapshot", side_effect=lambda *_: deepcopy(self.release))
+        p.start();self.addCleanup(p.stop)
+
+    def test_generation_counts_candidates_not_grounded_or_released(self):
+        result = production.outcome(self.run)
+        self.assertEqual(result["counts"], {GENERATION_LINE: 4})
+        self.assertEqual(result["count_basis"], "formed_candidates")
+        self.assertEqual(result["report"]["grounded_count"], 2)
+        self.assertEqual(result["deficits"], {})
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["selection_complete"])
+
+    def test_true_quality_does_not_hide_unmet_tokens_or_stale_corpus(self):
+        self.release["eligible"] = True
+        self.assertTrue(production.outcome(self.run)["passed"])
+        self.run.values["05_corpus_token_scale.json"]["target_met"] = False
+        result = production.outcome(self.run)
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["report"]["delivery_target_met"])
+        self.run.values["05_corpus_token_scale.json"]["target_met"] = True
+        with patch.object(factory, "_corpus_is_current", return_value=False):
+            self.assertFalse(production.outcome(self.run)["passed"])
+
+    def test_candidate_deficit_and_reserve_use_generation_rows(self):
+        self.run.values["04_questions.json"].pop()
+        result = production.outcome(self.run)
+        self.assertEqual(result["deficits"], {GENERATION_LINE: 1})
+        allocation = production.next_reserve(self.run.read("01_whitepaper.json")["supply_plan"], result)
+        self.assertEqual(allocation[GENERATION_LINE], 5)
+
+    def test_generation_target_cannot_claim_athlete_selection(self):
+        with self.assertRaisesRegex(ValueError, "Generation-only"):
+            production.outcome(self.run, selected=True)
+
+    def test_reserve_needs_only_native_order_counts_and_preserves_inputs(self):
+        other = "L2_relational"
+        plan = {"candidate_allocation": {GENERATION_LINE: 4, other: 5},
+                "final_allocation": {GENERATION_LINE: 4, other: 3}}
+        for version in (1, 2):
+            with self.subTest(version=version):
+                rows = ({GENERATION_LINE: {"orders": 3}, other: {"orders": 5}}
+                        if version == 2 else
+                        [{"line": GENERATION_LINE, "primary": {"effective_orders": 3}},
+                         {"line": other, "primary": {"effective_orders": 5}}])
+                result = {"report": {"version": version, "by_line": rows},
+                          "counts": {GENERATION_LINE: 2, other: 3},
+                          "deficits": {GENERATION_LINE: 2}}
+                original = deepcopy((plan, result))
+                self.assertEqual(production.next_reserve(plan, result),
+                                 {GENERATION_LINE: 6, other: 5})
+                self.assertEqual((plan, result), original)
+
+    def test_legacy_release_and_selection_have_their_own_denominators(self):
+        report = {"version": 1, "by_line": [{"line": GENERATION_LINE, "primary": {
+            "released": 3, "final_selected": 2, "effective_orders": 5}}],
+            "selection_complete": True, "corpus_target": {
+                "current": True, "measurement": {"target_met": True}}}
+        self.assertEqual(production._delivery_progress(report)["counts"], {GENERATION_LINE: 3})
+        self.assertEqual(production._delivery_progress(report, selected=True)["counts"], {GENERATION_LINE: 2})
+        self.assertEqual(production._delivery_progress(report)["observed_orders"], {GENERATION_LINE: 5})
+
+    def test_controller_finishes_v2_and_archives_prior_engineering_error_without_regeneration(self):
+        from pipeline.run import Stage
+        def forbidden(*args): self.fail("Completed stages must not regenerate")
+        stages = [Stage(name, [], forbidden, artifact) for name, artifact in (
+            ("input", "00_input.json"), ("whitepaper", "01_whitepaper.json"), ("world", "02_world.json"),
+            ("well_posed", "03_orders.json"), ("corpus", "05_corpus.json"), ("quality", "07_release.json"))]
+        self.run.manifest["config"]["production_control"] = {"version": "supply-driven/v5"}
+        wp = self.run.values["01_whitepaper.json"]
+        wp["world_blueprint"] = {}
+        plan = {"blueprint_hash": production.digest(wp["world_blueprint"])}
+        wp["business_instance_plan"] = {**plan, "plan_hash": production.digest(plan)}
+        self.run.manifest["stages"] = {s.name: {"done": True, "status": "succeeded"} for s in stages}
+        self.run.write(production.STATE, {"version": "supply-driven/v5", "identity": production.frozen_identity(self.run),
+            "round": 1, "status": "execution_error", "history": [], "error": "TypeError: old report contract"})
+        self.release["eligible"] = True
+        with patch.object(factory, "STAGES", stages), patch.object(factory, "generation_stages", return_value=stages):
+            state = production.produce(self.run, to_stage="quality")
+        self.assertEqual(state["status"], "generation_complete")
+        self.assertNotIn("error", state)
+        self.assertEqual(state["history"][0]["error"], "TypeError: old report contract")
+        self.assertEqual(state["result"]["counts"], {GENERATION_LINE: 4})
+        self.assertFalse(state["result"]["selection_complete"])
+        self.run.write("01_joint_design_receipt.json", {"release_eligible": False})
+        with patch.object(factory, "STAGES", stages), patch.object(factory, "generation_stages", return_value=stages):
+            warned = production.produce(self.run, to_stage="quality")
+        self.assertEqual(warned["status"], "generation_completed_with_warnings")
+        self.assertFalse(warned["release_eligible"])
+        self.assertEqual(len(warned["history"]), 1)
 
 
 if __name__ == "__main__":

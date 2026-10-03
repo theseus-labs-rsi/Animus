@@ -380,8 +380,9 @@ def review_grounding(questions, corpus, protocol, *, chat_json, model,
                 raise RuntimeError("Previous review execution failed; no further provider calls")
         try:
             if cache:
-                from pipeline import paged_read_v2
-                contracts = [paging_contract, Path(paged_read_v2.__file__).read_text(encoding="utf-8")]
+                from pipeline import paged_read_v2, paged_read_v3
+                contracts = [paging_contract, Path(paged_read_v3.__file__).read_text(encoding="utf-8"),
+                             Path(paged_read_v2.__file__).read_text(encoding="utf-8")]
                 for contract in contracts:
                     path = cache / (cache_key(messages, kwargs, candidate, contract) + ".json")
                     if not path.exists():

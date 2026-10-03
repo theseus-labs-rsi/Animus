@@ -1127,10 +1127,17 @@ def _review_action(raw, window, state, payload, *, allow_revision=False, revisio
     return result, False
 
 
+NOTE_COMPACTION_RULES = """你继续担任原世界审阅者，本次仅压缩自己的累积工作笔记。
+输入中的笔记是待整理材料。保留关键事实、ref id、时点、反证、尚未解决的跨批依赖和不确定性。
+完整原回复与正式提交的意见仍由程序保留，本动作不能修改、撤销或补造任何正式意见。
+只输出 {"action":"compact_notes","notes":"最多6000字符的工作笔记"}。
+"""
+
+
 def _scoped_review_session(wp, ws, task_input, previous, author_responses, model, tracer=None, transcript=None, records=None,
                            resume=(), save=None, legacy_resume_prefix=0,
                            compatibility_resume_length=0, transport_resume_prefix=0,
-                           downstream_evidence=None):
+                           downstream_evidence=None, compact_notes=False, notes_resume_prefix=0):
     from pipeline.world_context import AUTO_DELIVERY_INSTRUCTION, MAX_STEPS, ProgressGuard
     payload, _, binding = _inputs(wp, ws, task_input, previous, author_responses, downstream_evidence)
     window = _scoped_review_context(payload)
@@ -1163,7 +1170,9 @@ def _scoped_review_session(wp, ws, task_input, previous, author_responses, model
             isinstance(last_action, dict) and last_action.get("action") == "inspect")
         if number == transport_resume_prefix:
             preserve_visible = False
-        working = (_scoped_review_state(state) if historical_transport
+        compacting = (compact_notes and number >= notes_resume_prefix
+                      and not historical_transport and len(state["note"]) >= 12000)
+        working = (_scoped_review_state(state) if historical_transport or compacting
                    else _review_request_state(payload, window, state,
                                               preserve_visible=preserve_visible))
         if feedback is not None:
@@ -1175,8 +1184,13 @@ def _scoped_review_session(wp, ws, task_input, previous, author_responses, model
                 and number >= compatibility_resume_length):
             working["required_next_action"] = (
                 "All original nodes have been read. Output finish now; do not resubmit unchanged opinions.")
-        messages = window.messages(system, working)
-        window.mark_sent()
+        if compacting:
+            messages = [{"role": "system", "content": NOTE_COMPACTION_RULES},
+                        {"role": "user", "content": json.dumps({"accumulated_notes": state["note"],
+                            "action_error": feedback}, ensure_ascii=False)}]
+        else:
+            messages = window.messages(system, working)
+            window.mark_sent()
         # Inputs and exact action sequence reconstruct every byte offline; the
         # original provider trace already keeps full prompts. Avoid embedding
         # hundreds of repeated frozen schemas in the published world receipt.
@@ -1205,6 +1219,16 @@ def _scoped_review_session(wp, ws, task_input, previous, author_responses, model
             save(records)
         prior = deepcopy(state)
         try:
+            if compacting:
+                if (not isinstance(raw, dict) or set(raw) != {"action", "notes"}
+                        or raw["action"] != "compact_notes" or not isinstance(raw["notes"], str)
+                        or not raw["notes"].strip() or len(raw["notes"]) > 6000):
+                    raise ValueError("Note compaction requires compact_notes and nonempty notes within 6000 characters")
+                state.setdefault("note_compactions", []).append({"previous": state["note"],
+                    "replacement": raw["notes"], "transcript_entry": number})
+                state["note"] = raw["notes"]
+                feedback, failures = None, 0
+                continue
             legacy_entry = number < legacy_resume_prefix
             strict_echo_entry = legacy_resume_prefix <= number < compatibility_resume_length
             result, advance = _review_action(raw, window, state, payload,
@@ -1244,6 +1268,10 @@ def _scoped_review_session(wp, ws, task_input, previous, author_responses, model
                 raise ValueError("Extra scoped review transcript entries")
             binding.update(protocol="agentic-exact-read/v1", protocol_hash=_hash(system),
                            transcript_hash=_hash(records), call_hash=_hash(call))
+            if compact_notes:
+                binding["notes_protocol"] = "reviewer-compacted-notes/v1"
+                if notes_resume_prefix:
+                    binding["notes_resume_prefix"] = notes_resume_prefix
             if legacy_resume_prefix:
                 binding["legacy_resume_prefix"] = legacy_resume_prefix
             if compatibility_resume_length:
@@ -1276,6 +1304,7 @@ def _review_agentic(wp, ws, tracer, task_input, previous, author_responses, down
         from pipeline.run import _atomic_write_json
         resume, checkpoint, legacy_resume_prefix, compatibility_resume_length, migrated_from = [], None, 0, 0, None
         transport_resume_prefix = 0
+        notes_resume_prefix = 0
         checkpoint_inputs = _review_checkpoint_inputs(
             wp, ws, task_input, previous, author_responses, config.REVIEWER_MODEL, downstream_evidence)
         input_binding = _hash(checkpoint_inputs)
@@ -1292,6 +1321,7 @@ def _review_agentic(wp, ws, tracer, task_input, previous, author_responses, down
                 legacy_resume_prefix = stored.get("legacy_resume_prefix", 0)
                 compatibility_resume_length = stored.get("compatibility_resume_length", 0)
                 transport_resume_prefix = stored.get("transport_resume_prefix", 0)
+                notes_resume_prefix = stored.get("notes_resume_prefix", 0) if stored.get("notes_protocol") else len(resume)
             else:
                 # A parser-only repair changes the implementation identity.  A
                 # copied recovery run may still contain a compatible transcript.
@@ -1319,13 +1349,15 @@ def _review_agentic(wp, ws, tracer, task_input, previous, author_responses, down
                     compatibility_resume_length = stored.get(
                         "compatibility_resume_length", len(resume) if legacy_resume_prefix else 0)
                     transport_resume_prefix = stored.get("transport_resume_prefix", len(resume))
+                    notes_resume_prefix = stored.get("notes_resume_prefix", 0) if stored.get("notes_protocol") else len(resume)
         def save(records):
             if checkpoint:
                 body = {"identity": identity, "input_binding": input_binding,
                         "transcript": records, "hash": _hash(records),
                         "legacy_resume_prefix": legacy_resume_prefix,
                         "compatibility_resume_length": compatibility_resume_length,
-                        "transport_resume_prefix": transport_resume_prefix}
+                        "transport_resume_prefix": transport_resume_prefix,
+                        "notes_protocol": "reviewer-compacted-notes/v1", "notes_resume_prefix": notes_resume_prefix}
                 if migrated_from is not None:
                     body["migrated_from_checkpoint"] = migrated_from
                 _atomic_write_json(checkpoint, body)
@@ -1335,7 +1367,8 @@ def _review_agentic(wp, ws, tracer, task_input, previous, author_responses, down
                 records=report["transcript"], resume=resume, save=save,
                 legacy_resume_prefix=legacy_resume_prefix,
                 compatibility_resume_length=compatibility_resume_length,
-                transport_resume_prefix=transport_resume_prefix, downstream_evidence=downstream_evidence)
+                transport_resume_prefix=transport_resume_prefix, downstream_evidence=downstream_evidence,
+                compact_notes=True, notes_resume_prefix=notes_resume_prefix)
         except ValueError as exc:
             # A parser-only upgrade may reproduce an old transcript exactly up
             # to one action and then intentionally change the next prompt/state
@@ -1354,13 +1387,15 @@ def _review_agentic(wp, ws, tracer, task_input, previous, author_responses, down
             legacy_resume_prefix = min(legacy_resume_prefix, prefix)
             compatibility_resume_length = min(compatibility_resume_length, prefix)
             transport_resume_prefix = min(transport_resume_prefix, prefix)
+            notes_resume_prefix = min(notes_resume_prefix, prefix)
             report["transcript"].clear()
             payload, binding, call, transcript, raw = _scoped_review_session(
                 wp, ws, task_input, previous, author_responses, config.REVIEWER_MODEL, tracer=tracer,
                 records=report["transcript"], resume=resume, save=save,
                 legacy_resume_prefix=legacy_resume_prefix,
                 compatibility_resume_length=compatibility_resume_length,
-                transport_resume_prefix=transport_resume_prefix, downstream_evidence=downstream_evidence)
+                transport_resume_prefix=transport_resume_prefix, downstream_evidence=downstream_evidence,
+                compact_notes=True, notes_resume_prefix=notes_resume_prefix)
         report.update(input_snapshot=payload, binding=binding, call=call, transcript=transcript,
                       raw_output=raw, raw_output_hash=_hash(raw), caller_entered=True, logical_calls=len(transcript))
         report.update(_parse(raw, payload))
@@ -1389,7 +1424,9 @@ def _validate_agentic_review(report, wp, ws, task_input):
             transcript=report["transcript"], legacy_resume_prefix=legacy_resume_prefix,
             compatibility_resume_length=compatibility_resume_length,
             transport_resume_prefix=transport_resume_prefix,
-            downstream_evidence=report.get("downstream_evidence"))
+            downstream_evidence=report.get("downstream_evidence"),
+            compact_notes=(report.get("binding") or {}).get("notes_protocol") == "reviewer-compacted-notes/v1",
+            notes_resume_prefix=(report.get("binding") or {}).get("notes_resume_prefix", 0))
         if (report.get("input_snapshot") != payload or report.get("binding") != binding
                 or report.get("call") != call or report.get("raw_output") != raw
                 or report.get("raw_output_hash") != _hash(raw) or report.get("logical_calls") != len(transcript)

@@ -1128,6 +1128,14 @@ def run(
     removed: list[str] = []
     cleanup_failed: list[str] = []
     try:
+        if resume:
+            # A killed runner cannot execute the finally block below. Rebuild
+            # its scratch directories while preserving answers and telemetry.
+            _, stale_cleanup_failed = _clean_scratch(out_dir)
+            if stale_cleanup_failed:
+                raise ConfigurationError(
+                    "Cannot clear interrupted native scratch: " + ", ".join(stale_cleanup_failed)
+                )
         summary = _run_questions(
             plan_path,
             run_dir,

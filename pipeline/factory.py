@@ -1145,16 +1145,27 @@ def _corpus_is_current(run: Run) -> bool:
                     or measurement.get("tokenizer") != counter.tokenizer
                     or report.get("binding") != _corpus_scale_binding(run)
                     or report.get("total_tokens") != (measurement.get("total") or {}).get("tokens")
-                    or report.get("target_met") is not True
                     or (cfg.get("core_corpus_token_target") is not None
-                        and (report.get("core_target_tokens") != cfg["core_corpus_token_target"]
-                             or report.get("core_target_met") is not True
-                             or (measurement.get("core") or {}).get("tokens", 0)
-                                < cfg["core_corpus_token_target"]))
-                    or report.get("deficit_tokens") != 0
+                        and report.get("core_target_tokens") != cfg["core_corpus_token_target"])
                     or plan != plan_filler_batch(measurement, cfg["corpus_token_target"],
                                                  cfg.get("haystack_ratio"))):
                 return False
+            core_target = cfg.get("core_corpus_token_target")
+            core_met = (core_target is None or
+                        (measurement.get("core") or {}).get("tokens", 0) >= core_target)
+            scale_met = plan["target_met"] and core_met
+            if (report.get("target_met") is not scale_met
+                    or (core_target is not None and report.get("core_target_met") is not core_met)
+                    or report.get("deficit_tokens") != plan["remaining_filler_tokens"]):
+                return False
+            if not scale_met:
+                # Completed, bound material can still be read and diagnosed by
+                # generation-only V6. Quantity acceptance remains false in the
+                # scale/delivery receipts; never label a shortfall as staleness.
+                target = cfg.get("delivery_target") or {}
+                return ((cfg.get("production_control") or {}).get("version") == "supply-driven/v6"
+                        and target.get("version") == 2
+                        and target.get("count_stage") == "generation_quality")
         elif cfg.get("haystack_ratio") is not None:
             report = run.read("05_corpus_scale.json")
             if (report.get("target_chars") != cfg.get("target_tokens", 1_000_000)

@@ -756,6 +756,11 @@ def reuse_original_stages(source, directory, through, *, reuse_world_checkpoint=
         # the units, checks seed requirements and runs disclosure/business review.
     if "questions" in stages:
         names.add("04_wording_report.json")
+    if "orders" in stages:
+        # Reused orders retain their exact capacity decision and warnings.
+        # Omitting these receipts can silently lose an exploratory restriction.
+        names |= {name for name in ("03_capacity_gate.json", "03_orders_warning.json")
+                  if (source / name).is_file()}
     if "corpus" in stages:
         names |= {name for name in ("05_corpus_scale.json", "05_corpus_token_scale.json",
             "05_corpus_review.json",

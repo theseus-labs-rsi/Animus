@@ -382,6 +382,8 @@ class ProductionReuseTests(unittest.TestCase):
 
     def test_corpus_prefix_does_not_copy_questions_and_resumes_at_questions(self):
         self.write("05_corpus_token_scale.json", {"marker": "frozen-token-receipt"})
+        self.write("03_capacity_gate.json", {"passed": True, "release_eligible": False})
+        self.write("03_orders_warning.json", {"status": "warning", "release_eligible": False})
         result = reuse_original_stages(self.source, self.target, "corpus")
         self.assertEqual(result["derived_from"]["resume_from"], "questions")
         self.assertTrue((self.target / "05_corpus.json").is_file())
@@ -389,6 +391,9 @@ class ProductionReuseTests(unittest.TestCase):
                          (self.source / "05_corpus_token_scale.json").read_bytes())
         self.assertFalse((self.target / "04_questions.json").exists())
         self.assertNotIn("questions", result["stages"])
+        for name in ("03_capacity_gate.json", "03_orders_warning.json"):
+            self.assertEqual((self.target / name).read_bytes(), (self.source / name).read_bytes())
+            self.assertIn(name, result["derived_from"]["input_files"])
 
     def test_corpus_prefix_cannot_reuse_question_review_checkpoints(self):
         with self.assertRaisesRegex(ValueError, "exact corpus reuse"):

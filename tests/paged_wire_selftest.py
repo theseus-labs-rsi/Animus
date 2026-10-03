@@ -8,7 +8,7 @@ import tempfile
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pipeline import paged_read, paged_read_v2
+from pipeline import paged_read, paged_read_v2, paged_read_v3
 
 
 class Tests(unittest.TestCase):
@@ -68,6 +68,46 @@ class Tests(unittest.TestCase):
             paged_read.call("semantic_review.blind_read", messages,
                 chat_json=lambda *a, **kw: {"action": "inspect", "doc_ids": ["invented"]})
 
+    def test_complete_delivery_hint_breaks_continue_loop_without_changing_opinion(self):
+        messages, docs = self.messages()
+        def reader(step, request, **kw):
+            body = json.loads(request[-1]["content"])
+            work = body["working_state"]
+            if body["unread_ids"]:
+                return {"action": "continue", "notes": "unresolved counterevidence"}
+            self.assertIn("action=finish", work["required_next_action"])
+            return {"action": "finish", "opinion": self.opinion()}
+        output = paged_read.call("semantic_review.blind_read", messages, chat_json=reader)
+        self.assertEqual(output["coverage"], {"status": "partial"})
+        paged_read.validate(output, docs)
+
+    def test_inspect_after_delivery_really_resends_requested_original(self):
+        messages, docs = self.messages()
+        reread = False
+        def reader(step, request, **kw):
+            nonlocal reread
+            body = json.loads(request[-1]["content"])
+            if body["unread_ids"]:
+                return {"action": "continue", "notes": "read"}
+            if not reread:
+                reread = True
+                return {"action": "inspect", "doc_ids": ["d2"]}
+            self.assertEqual(body["exact_reads"]["d2"]["value"], docs[1])
+            return {"action": "finish", "opinion": self.opinion()}
+        output = paged_read.call("semantic_review.blind_read", messages, chat_json=reader)
+        paged_read.validate(output, docs)
+
+    def test_v3_receipt_replays_with_its_original_transport(self):
+        messages, docs = self.messages()
+        def reader(step, request, **kw):
+            body = json.loads(request[-1]["content"])
+            return ({"action": "continue", "notes": "read"} if body["unread_ids"] else
+                    {"action": "finish", "opinion": self.opinion()})
+        output = paged_read_v3.call("semantic_review.blind_read", messages, chat_json=reader)
+        before = deepcopy(output)
+        paged_read.validate(output, docs)
+        self.assertEqual(output, before)
+
     def test_legacy_receipt_stays_exact_and_unchanged(self):
         messages, docs = self.messages()
         def reader(step, request, **kw):
@@ -78,6 +118,12 @@ class Tests(unittest.TestCase):
         self.assertEqual(before, output)
 
     def test_legacy_role_cache_reused_without_provider_or_opinion_change(self):
+        self.check_legacy_role_cache(paged_read_v2)
+
+    def test_v3_role_cache_reused_without_provider_or_opinion_change(self):
+        self.check_legacy_role_cache(paged_read_v3)
+
+    def check_legacy_role_cache(self, legacy):
         from pipeline import grounding_review
         from original_grounding_selftest import fixture, opinions
         from semantic_review_fixture_helpers import audit_output, attach_targets
@@ -92,7 +138,7 @@ class Tests(unittest.TestCase):
             else: result = attach_targets(opinions().responses[1], context["reference_proposal"])
             return {"action": "finish", "opinion": result}
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(paged_read, "__file__", paged_read_v2.__file__), patch.object(paged_read, "call", paged_read_v2.call):
+            with patch.object(paged_read, "__file__", legacy.__file__), patch.object(paged_read, "call", legacy.call):
                 kept, report, old = grounding_review.review_grounding([question], corpus, protocol,
                     chat_json=reader, model="test", isolated_reference=True, checkpoint_dir=directory)
             def forbidden(*a, **kw): self.fail("Historical successful role must be reused")

@@ -651,6 +651,54 @@ class NativeCliTests(unittest.TestCase):
             for name in ("run_plan.json", "results.jsonl", "events.jsonl", "summary.json", "execution.json"):
                 self.assertTrue((run_dir / name).is_file(), name)
 
+    def test_parallel_resume_rebuilds_interrupted_scratch_and_keeps_answers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            questions = [{"qid": f"q{i}", "question": "状态？", "line": "L1", "capability": "KU",
+                          "quality_status": "released"}
+                         for i in range(2)]
+            references = [{"qid": f"q{i}", "answer": "进行中", "answer_raw": "进行中",
+                           "answer_projection": "raw_gt", "quality_status": "released"} for i in range(2)]
+            benchmark = build_standard_light(root / "benchmark", questions, references)
+            fake_cli = write_cli(root / "fake-claude", 'print(\'{"result":"fake-answer"}\')\n')
+            env_file = root / "claude.env"
+            env_file.write_text("ANTHROPIC_API_KEY=secret\nANTHROPIC_BASE_URL=https://example.invalid/v1\n"
+                                f"CLAUDE_BIN={fake_cli}\n", encoding="utf-8")
+            out = root / "out"
+            out.mkdir()
+            plan_path = out / "run_plan.json"
+            plan_path.write_text(json.dumps({
+                "system_id": "native.claude-code",
+                "model": {"model_id": "fake-model", "endpoint_profile": "ANTHROPIC"},
+                "system": {"implementation": {"runner": "native_cli", "adapter": "claude",
+                    "env_file": str(env_file), "executable": True}},
+            }), encoding="utf-8")
+            run(plan_path, benchmark, out, limit=2, parallel_questions=2, keep_scratch=True)
+            rows = [json.loads(line) for line in (out / "results.jsonl").read_text().splitlines()]
+            completed = next(row for row in rows if row["question_index"] == 0)
+            failed = next(row for row in rows if row["question_index"] == 1)
+            failed.update(status="failed", answer=None)
+            preserved = json.dumps(completed) + "\n" + json.dumps(failed) + "\n"
+            (out / "results.jsonl").write_text(preserved, encoding="utf-8")
+            # Simulate scratch left behind by a kill, including untrusted edits.
+            (out / "workspace/q0001/AGENTS.md").write_text("stale instruction")
+            (out / "runtime").mkdir(exist_ok=True)
+            (out / "runtime/stale-session").write_text("stale conversation")
+            summary = run(plan_path, benchmark, out, limit=2, resume=True,
+                          parallel_questions=2, keep_scratch=True)
+            result_text = (out / "results.jsonl").read_text(encoding="utf-8")
+            self.assertTrue(result_text.startswith(preserved))
+            resumed_rows = [json.loads(line) for line in result_text.splitlines()]
+            self.assertEqual(len(resumed_rows), 3)
+            self.assertEqual(resumed_rows[-1]["question_index"], 1)
+            self.assertEqual(resumed_rows[-1]["status"], "completed")
+            self.assertEqual(summary["n_errors"], 0)
+            self.assertFalse((out / "workspace/q0000").exists())
+            self.assertFalse((out / "workspace/q0001/AGENTS.md").exists())
+            self.assertFalse((out / "runtime/stale-session").exists())
+            self.assertEqual(sorted(p.name for p in (out / "workspace/q0001").iterdir()),
+                             ["INDEX.md", "sessions"])
+
     def test_resume_reuses_the_same_run_dir(self):
         registry = load_registry()
         base = load_experiment(

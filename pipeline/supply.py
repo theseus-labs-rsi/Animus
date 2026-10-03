@@ -241,8 +241,8 @@ def write_delivery_report(run):
                   "by_line": by_line, "corpus_target": token_scale,
                   "corpus_current": corpus_current,
                   "quality_eligible": bool(release and release.get("eligible")),
-                  "delivery_target_met": bool(candidate_met and corpus_current and token_scale.get("target_met") and release
-                                              and release.get("eligible")),
+                  "delivery_target_met": bool(candidate_met and corpus_current and release
+                                              and release.get("eligible") and token_scale.get("target_met") is True),
                   "selection_scope": "not_run"}
         run.write("10_delivery_target.json", report)
         return report

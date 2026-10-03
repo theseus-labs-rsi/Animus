@@ -195,11 +195,15 @@ class ProductionTransactionTests(unittest.TestCase):
         return new
 
     def result(self, l7=1, errors=()):
-        rows = [{"line": line, "primary": {"effective_orders": 3}} for line in self.t["requested_lines"]]
+        rows = [{"line": line, "primary": {"effective_orders": 3,
+                "released": l7 if line == "L7_consolidation" else 2,
+                "final_selected": l7 if line == "L7_consolidation" else 2}}
+                for line in self.t["requested_lines"]]
         return {"counts": {"L1_timeline": 2, "L7_consolidation": l7}, "count_stage": "generation_quality",
                 "deficits": {"L7_consolidation": 2-l7} if l7 < 2 else {},
                 "review_execution_errors": list(errors), "passed": l7 >= 2,
-                "report": {"by_line": rows, "quality_eligible": True, "selection_complete": True,
+                "corpus_current": True, "corpus_target_met": True, "selection_complete": True,
+                "report": {"version": 1, "by_line": rows, "quality_eligible": True, "selection_complete": True,
                            "corpus_target": {"current": True, "measurement": {"target_met": True}}}}
 
     def test_line_specific_losses_increase_only_that_reserve(self):

@@ -244,6 +244,24 @@ class CorpusTokenRenderTests(TestCase):
             with patch.object(factory, "_require_current_corpus_review", return_value=None):
                 self.assertFalse(factory._corpus_is_current(run))
 
+                # V6 may finish downstream diagnostics on exact completed
+                # material, while the frozen token acceptance stays unmet.
+                run.manifest["config"].update(production_control={"version": "supply-driven/v6"},
+                    delivery_target={"version": 2, "count_stage": "generation_quality"})
+                self.assertTrue(factory._corpus_is_current(run))
+                self.assertFalse(run.read("05_corpus_token_scale.json")["target_met"])
+                for change in ({"attempt_complete": False}, {"status": "incomplete"},
+                               {"binding": {}}, {"target_met": True},
+                               {"core_target_met": True}, {"deficit_tokens": 1}):
+                    with self.subTest(change=change):
+                        run.write("05_corpus_token_scale.json", {**report, **change})
+                        self.assertFalse(factory._corpus_is_current(run))
+                run.write("05_corpus_token_scale.json", report)
+                for scope in ({"version": 1, "count_stage": "selection_complete"},
+                              {"version": 2, "count_stage": "selection_complete"}):
+                    run.manifest["config"]["delivery_target"] = scope
+                    self.assertFalse(factory._corpus_is_current(run))
+
 
 if __name__ == "__main__":
     main(verbosity=2)

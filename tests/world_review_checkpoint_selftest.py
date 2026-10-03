@@ -201,5 +201,99 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(preserved.read_bytes(), original)
 
 
+
+
+class NoteCompactionReader:
+    def __init__(self, bad_compaction=False):
+        self.compactions = 0
+        self.max_body = 0
+        self.bad_compaction = bad_compaction
+
+    def chat_json(self, step, messages, **params):
+        self.max_body = max(self.max_body, len(messages[-1]["content"]))
+        p = json.loads(messages[-1]["content"])
+        if "accumulated_notes" in p:
+            self.compactions += 1
+            return {"action": "compact_notes", "notes": "x" * 6001 if self.bad_compaction else
+                    "Unresolved offline issue i1 and mechanism m1 remain unresolved; retain their original refs."}
+        state = p["working_state"]
+        if p["unread_ids"] or not state["mechanism_coverage"]:
+            refs = [r["ref_id"] for node in p["exact_reads"].values() for r in node.get("reference_index", [])]
+            first = not state["mechanism_coverage"]
+            return {"action": "submit", "note": "Offline batch reading note. " * 55,
+                    "issues": [{"id": "i1", "finding": "Unresolved offline contradiction.",
+                        "refs": refs[:1], "alternative_reading": "No resolving evidence in this fixture.",
+                        "disposition": "unresolved"}] if first else [],
+                    "mechanism_coverage": [{"mechanism_id": "m1", "status": "unresolved",
+                        "refs": refs[:1], "observed_sequence": "Offline observations only.",
+                        "reason": "Unresolved; compaction cannot change this opinion."}] if first else []}
+        return {"action": "finish", "decision": "unresolved", "reason": "The original negative opinion remains.",
+                "limitations": "Offline transport test only.", "repair_targets": {"intrinsic": [], "structure": False}}
+
+class NotesCompactionTests(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(patch.stopall)
+        patch.object(socket.socket, "connect", side_effect=AssertionError("network forbidden")).start()
+        patch.dict(sys.modules, {"config": SimpleNamespace(REVIEWER_MODEL="offline")}).start()
+        self.wp, self.ws, self.task = fixture()
+        self.wp["world_generation"] = {"strategy": "agentic"}
+        original = self.ws.entities["甲/~记录"]
+        for i in range(360):
+            key = f"record-{i}"
+            self.ws.entities[key] = deepcopy(original)
+            self.ws.entity_types[key] = "record"
+
+    def test_long_notes_compact_with_exact_replay_and_negative_opinion_preserved(self):
+        reader = NoteCompactionReader()
+        report = review.review_world(self.wp, self.ws, reader, self.task)
+        self.assertEqual(report["status"], "unresolved", report.get("error"))
+        self.assertGreater(reader.compactions, 0)
+        self.assertLessEqual(reader.max_body, 120000)
+        self.assertEqual(report["binding"]["notes_protocol"], "reviewer-compacted-notes/v1")
+        self.assertEqual(report["issues"][0]["disposition"], "unresolved")
+        self.assertEqual(report["mechanism_coverage"][0]["status"], "unresolved")
+        findings = review.validate_review(report, self.wp, self.ws, self.task)
+        self.assertEqual([r["code"] for r in findings], ["world_review_not_passed"])
+        changed = deepcopy(report)
+        entry = next(r for r in changed["transcript"] if r["raw_output"].get("action") == "compact_notes")
+        entry["raw_output"]["notes"] = "tampered"
+        self.assertEqual(review.validate_review(changed, self.wp, self.ws, self.task)[0]["code"],
+                         "missing_or_stale_world_review")
+
+    def test_invalid_compaction_stops_without_certifying_or_discarding_original_reads(self):
+        reader = NoteCompactionReader(bad_compaction=True)
+        report = review.review_world(self.wp, self.ws, reader, self.task)
+        self.assertEqual(report["status"], "error")
+        self.assertEqual(reader.compactions, 4)
+        self.assertIn("Note compaction", report["error"])
+        self.assertTrue(any(r["raw_output"].get("action") == "submit" for r in report["transcript"]))
+
+    def test_old_large_note_prefix_resumes_without_inserting_new_calls_into_history(self):
+        class Interrupted(NoteCompactionReader):
+            def chat_json(self, step, messages, **params):
+                if len(json.loads(messages[-1]["content"])["working_state"]["note"]) >= 18000:
+                    raise RuntimeError("offline interruption")
+                return super().chat_json(step, messages, **params)
+        old = []
+        with self.assertRaisesRegex(RuntimeError, "offline interruption"):
+            review._scoped_review_session(self.wp, self.ws, self.task, None, None, "offline",
+                                          tracer=Interrupted(), records=old, compact_notes=False)
+        old.pop()  # Interrupted calls do not contain a resumable response.
+        prefix = len(old)
+        reader = NoteCompactionReader()
+        _, binding, _, records, raw = review._scoped_review_session(
+            self.wp, self.ws, self.task, None, None, "offline", tracer=reader,
+            resume=old, compact_notes=True, notes_resume_prefix=prefix)
+        self.assertEqual(records[:prefix], old)
+        self.assertEqual(records[prefix]["raw_output"]["action"], "compact_notes")
+        self.assertEqual(raw["decision"], "unresolved")
+        self.assertEqual(binding["notes_resume_prefix"], prefix)
+        _, _, _, replayed, replay_raw = review._scoped_review_session(
+            self.wp, self.ws, self.task, None, None, "offline", transcript=records,
+            compact_notes=True, notes_resume_prefix=prefix)
+        self.assertEqual(replayed, records)
+        self.assertEqual(replay_raw, raw)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

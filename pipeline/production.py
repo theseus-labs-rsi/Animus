@@ -125,12 +125,28 @@ def observe_budget(run, state):
     state["generation_budget"] = current
 
 
-def _corpus_status(report):
-    """Read the token receipt under its declared delivery-report version."""
-    if report.get("version") == 2:
-        return bool(report.get("corpus_current")), report.get("corpus_target") or {}
-    corpus = report.get("corpus_target") or {}
-    return bool(corpus.get("current")), corpus.get("measurement") or {}
+def _delivery_progress(report, *, selected=False):
+    """Read each target's native counts without reinterpreting candidates as release."""
+    if report["version"] == 2:
+        if selected:
+            raise ValueError("Generation-only delivery targets count generation quality, not four-model selection")
+        rows = report["by_line"]
+        if not isinstance(rows, dict):
+            raise ValueError("Generation delivery report requires line-keyed rows")
+        return {"counts": {line: row["formed_candidates"] for line, row in rows.items()},
+                "observed_orders": {line: row["orders"] for line, row in rows.items()},
+                "count_basis": "formed_candidates", "selection_complete": False,
+                "corpus_current": report["corpus_current"],
+                "corpus_target_met": report["corpus_target"].get("target_met") is True}
+    if report["version"] != 1:
+        raise ValueError("Unsupported delivery report version")
+    rows = report["by_line"]
+    field = "final_selected" if selected else "released"
+    return {"counts": {row["line"]: row["primary"][field] for row in rows},
+            "observed_orders": {row["line"]: row["primary"]["effective_orders"] for row in rows},
+            "count_basis": field, "selection_complete": report["selection_complete"],
+            "corpus_current": report["corpus_target"]["current"],
+            "corpus_target_met": (report["corpus_target"].get("measurement") or {}).get("target_met") is True}
 
 
 def outcome(run, *, selected=False):
@@ -138,25 +154,20 @@ def outcome(run, *, selected=False):
     from pipeline.supply import write_delivery_report
     report = write_delivery_report(run)
     plan = run.read("01_whitepaper.json")["supply_plan"]
-    generation_only = report.get("version") == 2
-    if generation_only:
-        if selected:
-            raise ValueError("V2 delivery targets count generation candidates, not four-model selection")
-        counts = {line: row["formed_candidates"] for line, row in report["by_line"].items()}
-    else:
-        field = "final_selected" if selected else "released"
-        counts = {row["line"]: row["primary"][field] for row in report["by_line"]}
+    progress = _delivery_progress(report, selected=selected)
+    counts = progress["counts"]
     deficits = {line: goal - (counts.get(line) or 0) for line, goal in plan["final_allocation"].items()
                 if (counts.get(line) or 0) < goal}
-    # Count native trends only after their original qids survive the current
-    # quality partition. A world-level S1 certificate cannot certify a released
-    # subset that retained only comparisons (or a renamed planted trend).
+    # Native trends require the current eligible quality partition. Selection
+    # further restricts that released subset to retained qids.
+    # A world-level S1 certificate cannot certify the retained question subset.
     l7 = "L7_consolidation"
     declared_native = [row.get("subtype_minimum", {}).get("native_trend", 0)
                        for row in plan.get("requirements", []) if row.get("line") == l7]
     native_minimum = (max([int(bool(plan.get("instance_policy"))), *declared_native])
                       if plan["final_allocation"].get(l7) else 0)
     native = {"required": native_minimum, "count_stage": "selection_complete" if selected else "generation_quality",
+              "count_basis": "final_selected" if selected else "released",
               "actual": 0, "qids": [], "family_keys": [], "source_mismatches": []}
     if native_minimum:
         from pipeline.capability_contract import family_key
@@ -166,7 +177,7 @@ def outcome(run, *, selected=False):
         kept = set(partition.get("released", [])) if release.get("eligible") else set()
         if selected:
             kept &= ({row["qid"] for row in run.read("09_selected_questions.json")}
-                     if report["selection_complete"] and run.has("09_selected_questions.json") else set())
+                     if progress["selection_complete"] and run.has("09_selected_questions.json") else set())
         candidates = {row["qid"]: row for row in run.read("04_questions.json")} if run.has("04_questions.json") else {}
         orders = {row["qid"]: row for row in run.read("03_orders.json")} if run.has("03_orders.json") else {}
         families = set()
@@ -194,8 +205,8 @@ def outcome(run, *, selected=False):
             stages = row.get("stage_execution") or {}
             if any(isinstance(value, dict) and value.get("status") == "model_error" for value in stages.values()):
                 execution_errors.append(row.get("source_qid", row.get("qid")))
-    corpus_current, measurement = _corpus_status(report)
     return {"count_stage": "selection_complete" if selected else "generation_quality",
+            **{key: value for key, value in progress.items() if key != "counts"},
             "counts": counts, "deficits": deficits, "report": report, "native_trend": native,
             "review_execution_errors": execution_errors,
             "passed": bool(not deficits and native["passed"] and report["quality_eligible"]
@@ -203,9 +214,9 @@ def outcome(run, *, selected=False):
                           run.read("03_capacity_gate.json").get("passed") is False)
                  and not (run.has("02_source_supply_gate.json") and
                           run.read("02_source_supply_gate.json").get("release_eligible") is False)
-                 and corpus_current and measurement.get("target_met")
-                 and (not generation_only or report["candidate_target_met"])
-                and (not selected or report["selection_complete"]))}
+                and progress["corpus_current"] and progress["corpus_target_met"]
+                and (report["version"] != 2 or report["candidate_target_met"])
+                and (not selected or progress["selection_complete"]))}
 
 
 def next_reserve(plan, result):
@@ -446,6 +457,11 @@ def _produce(run, *, to_stage=None, force=False):
     if state.get("identity") != identity:
         raise ValueError("Production target/configuration changed; use a separately frozen run")
     observe_budget(run, state)
+    if state["status"] == "execution_error":
+        state["history"].append({"operation": "retry_after_execution_error",
+                                 "error": state.get("error"), "round": state["round"]})
+        state.pop("error", None)
+        state["status"] = "running"
     stages = generation_stages(run)
     if state["status"] == "installing_revision":
         with run.stage_write_lock("production_install_revision"):
@@ -534,13 +550,13 @@ def _produce(run, *, to_stage=None, force=False):
                 state.update(status="review_recovery_required", result=result)
                 save_state(run, state)
                 return state
-            corpus_current, measurement = _corpus_status(result["report"])
-            if not result["report"]["quality_eligible"] or not corpus_current:
+            if not result["report"]["quality_eligible"] or not result["corpus_current"]:
                 state.update(status="review_recovery_required", result=result)
                 save_state(run, state)
                 return state
-            if not measurement.get("target_met"):
-                state.update(status="design_diagnosis_required", reason="Corpus token contract unmet", result=result)
+            if not result["corpus_target_met"]:
+                state.update(status="design_diagnosis_required", reason="Corpus token contract unmet",
+                             release_eligible=False, result=result)
                 save_state(run, state)
                 return state
             if result["passed"] and cfg.get("calibration") and boundary in ("calibration", "selection"):
@@ -551,14 +567,14 @@ def _produce(run, *, to_stage=None, force=False):
                     return state
                 result = outcome(run, selected=True)
                 observe_budget(run, state)
-                if not result["report"]["selection_complete"]:
+                if not result["selection_complete"]:
                     state.update(status="awaiting_complete_scores", result=result)
                     save_state(run, state)
                     return state
             if result["passed"]:
-                state.update(status="generation_complete" if generation_only else
+                state.update(status=("generation_complete" if result["report"]["version"] == 2 else
                              "delivered" if result["count_stage"] == "selection_complete" else
-                             "generation_ready_awaiting_selection", result=result)
+                             "generation_ready_awaiting_selection"), result=result)
                 save_state(run, state)
                 return state
             state["history"].append({"round": state["round"], "result": result,

@@ -51,11 +51,10 @@ def _next(window):
     return window.deliver_next_unread()
 
 
-def _session(messages, step, params, chat_json=None, transcript=None, *, legacy=None):
+def _session(messages, step, params, chat_json=None, transcript=None, *, legacy=False):
     if legacy:
-        from pipeline import paged_read_v2, paged_read_v3
-        implementation = paged_read_v2 if legacy == "exact-public-pages/v2" else paged_read_v3
-        return implementation._session(messages, step, params, chat_json=chat_json, transcript=transcript)
+        from pipeline import paged_read_v2
+        return paged_read_v2._session(messages, step, params, chat_json=chat_json, transcript=transcript)
     window = _window(messages)
     system = messages[0]["content"] + AUTO_DELIVERY_INSTRUCTION + RULES
     notes, records, failures, feedback = "", [], 0, None
@@ -63,13 +62,7 @@ def _session(messages, step, params, chat_json=None, transcript=None, *, legacy=
     _next(window)
     allowance = min(2400, max(24, sum(window.parts(key) for key in window.nodes) * 4))
     for number in range(allowance):
-        working = {"reading_notes": notes, "action_error": feedback}
-        if window.read == set(window.nodes):
-            working["required_next_action"] = (
-                'All original pages have been delivered. Return action=finish with the complete '
-                'original role opinion, retaining partial/unknown/unresolved when appropriate. '
-                'Use inspect only to reread specific existing document IDs; continue cannot deliver more pages.')
-        request = window.messages(system, working)
+        request = window.messages(system, {"reading_notes": notes, "action_error": feedback})
         if sum(len(m["content"]) for m in request) > LIMIT:
             raise ValueError("Non-document review context exceeds paged request allowance")
         window.mark_sent()
@@ -95,8 +88,6 @@ def _session(messages, step, params, chat_json=None, transcript=None, *, legacy=
                 action = {"action": "finish", "opinion": action}
             raw = action
             if raw.get("action") == "continue":
-                if window.read == set(window.nodes):
-                    raise ValueError("All original pages are delivered; use finish or inspect existing document IDs")
                 if not isinstance(raw.get("notes"), str) or len(raw["notes"]) > 6000:
                     raise ValueError("Reading notes must be text within 6000 characters")
                 notes = raw["notes"]
@@ -111,23 +102,19 @@ def _session(messages, step, params, chat_json=None, transcript=None, *, legacy=
                     raise ValueError("Extra paged reader transcript")
                 return deepcopy(opinion), records
             elif raw.get("action") == "inspect":
-                # Deliver every unread page first; after complete delivery,
-                # honor explicit rereads without changing the original opinion.
+                # Exact semantic review requires every selected document.  An
+                # invalid or repeated model-selected ID used to terminate the
+                # current candidate even though the deterministic next page was
+                # already known.  Treat inspect as an optional note update and
+                # keep automatic delivery moving; the model still makes the
+                # eventual semantic decision after all original text is sent.
                 if isinstance(raw.get("notes"), str) and len(raw["notes"]) <= 6000:
                     notes = raw["notes"]
-                ids = raw.get("ids")
-                if (not isinstance(ids, list) or not ids or len(ids) > 12
-                        or any(not isinstance(key, str) or key not in window.nodes for key in ids)
-                        or len(set(ids)) != len(ids)):
-                    raise ValueError("Inspect needs 1 to 12 distinct existing document IDs")
-                if window.read == set(window.nodes):
-                    window.control(raw)
-                else:
-                    _next(window)
-            elif raw.get("action") == "index":
-                if window.read == set(window.nodes):
-                    raise ValueError("All original pages are delivered; return finish instead of index")
                 _next(window)
+                feedback = "inspect is unnecessary; the next unread original material was delivered automatically"
+            elif raw.get("action") == "index":
+                _next(window)
+                feedback = "index is unnecessary; the next unread original material was delivered automatically"
             else:
                 raise ValueError("Use continue/finish; automatic delivery does not require directory actions")
             progress.observe(window.progress_marker())
@@ -162,7 +149,7 @@ def call(step, messages, *, chat_json, **params):
     if sum(len(m["content"]) for m in messages) <= LIMIT:
         return chat_json(step, messages, **params)
     opinion, transcript = _session(messages, step, params, chat_json=chat_json)
-    opinion["_paged_read"] = {"version": "exact-public-pages/v4", "messages": deepcopy(messages),
+    opinion["_paged_read"] = {"version": "exact-public-pages/v3", "messages": deepcopy(messages),
         "step": step, "params": deepcopy(params), "transcript": transcript}
     return opinion
 
@@ -171,11 +158,11 @@ def validate(output, documents):
     receipt = output.get("_paged_read") if isinstance(output, dict) else None
     if receipt is None:
         return
-    if receipt.get("version") not in {"exact-public-pages/v2", "exact-public-pages/v3", "exact-public-pages/v4"}:
+    if receipt.get("version") not in {"exact-public-pages/v2", "exact-public-pages/v3"}:
         raise ValueError("Unknown public paging protocol")
     if json.loads(receipt["messages"][-1]["content"]).get("documents") != documents:
         raise ValueError("Paged reader public corpus changed")
     opinion, _ = _session(receipt["messages"], receipt["step"], receipt["params"], transcript=receipt["transcript"],
-                         legacy=receipt["version"] if receipt["version"] != "exact-public-pages/v4" else None)
+                         legacy=receipt["version"] == "exact-public-pages/v2")
     if opinion != {k:v for k,v in output.items() if k != "_paged_read"}:
         raise ValueError("Paged reader final opinion changed")

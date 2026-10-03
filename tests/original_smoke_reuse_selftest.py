@@ -16,7 +16,7 @@ os.environ.setdefault("OPENAI_API_KEY", "offline-selftest")
 os.environ.setdefault("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
 os.environ.setdefault("MODEL", "offline-model")
 from pipeline.seed_pack import load_seed_pack, seed_contract, seed_digest, seed_input
-from tools.run_original_bc_smoke import reuse_original_stages
+from tools.run_original_bc_smoke import reuse_original_stages, quantity_arguments
 from seed_contract_selftest import fixture as synthetic_seed
 
 
@@ -61,6 +61,16 @@ class ReuseTests(unittest.TestCase):
         self.assertNotIn("quality", result["algo"])
         self.assertNotIn("augment", result["config"])
         self.assertEqual(set(result["stages"]), {"input", "whitepaper"})
+
+    def test_checkpoint_reuse_keeps_source_quantities_without_smoke_defaults(self):
+        from types import SimpleNamespace
+        args = SimpleNamespace(source_run="frozen-source", reuse_world_checkpoint=True,
+            resume_existing=False, min_questions=None, question_budget=None,
+            max_world_entities=80, time_span_weeks=None, delivery_target=None)
+        self.assertEqual(quantity_arguments(args), [])
+        args.question_budget = 200
+        self.assertEqual(quantity_arguments(args),
+                         ["--question-budget", "200", "--max-world-entities", "80"])
 
     def test_world_reuse_keeps_seed_world_audit(self):
         result = reuse_original_stages(self.source, self.target, "world")

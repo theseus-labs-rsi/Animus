@@ -90,6 +90,44 @@ class CapacityGateTests(unittest.TestCase):
         self.assertEqual(receipt["selected_by_line"], {"L1_timeline": 2, "L7_consolidation": 1})
         self.assertEqual(len(selected), 3)
 
+    def test_design_limit_retains_ordinary_supply_checkpoint_without_new_calls(self):
+        supply.attach_plan(self.wp, target(["L1_timeline", "L3_process"], 4), 10, capacity_driven=True)
+        trace = ScriptedTracer([(PLAN, write("one")), (WRITE, table_part(self.table, [0, 1], True)),
+                                (PLAN, FINISH), (PLAN, FINISH)])
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "world.json"
+            with self.assertRaises(supply_capacity.CapacityReviewRequested):
+                generate_world(self.wp, trace, checkpoint_path=path, log=lambda *_: None)
+            parent = json.loads(path.read_text(encoding="utf-8"))
+            resumed_trace = ScriptedTracer([])
+            table, child = generate_world(self.wp, resumed_trace, resume_state=parent,
+                allow_supply_shortfall=True, log=lambda *_: None)
+            self.assertEqual(resumed_trace.calls, [])
+            for key in ("units", "log", "steps", "retired_units", "upstream_request"):
+                self.assertEqual(child[key], parent[key], key)
+            self.assertEqual(child["status"], "completed")
+            self.assertFalse(child["release_eligible"])
+            self.assertGreater(child["supply_warning"]["shortfall"], 0)
+            self.assertEqual(child["supply_warning"]["world_hash"], parent["upstream_request"]["inventory"]["world_hash"])
+            # A valid hash alone cannot make malformed facts executable.
+            broken = deepcopy(parent)
+            broken["units"][0]["raw"]["events"][0]["participants"] = {"unknown_role": "missing entity"}
+            from pipeline.world_agent import _digest, _save
+            broken["units"][0]["raw_hash"] = _digest(broken["units"][0]["raw"])
+            _save(None, broken)
+            with self.assertRaises(ValueError):
+                generate_world(self.wp, ScriptedTracer([]), resume_state=broken,
+                    allow_supply_shortfall=True, log=lambda *_: None)
+
+    def test_design_limit_live_finish_warns_without_supply_repair(self):
+        supply.attach_plan(self.wp, target(["L1_timeline", "L3_process"], 4), 10, capacity_driven=True)
+        trace = ScriptedTracer([(PLAN, write("one")), (WRITE, table_part(self.table, [0, 1], True)),
+                                (PLAN, FINISH)])
+        _, state = generate_world(self.wp, trace, allow_supply_shortfall=True, log=lambda *_: None)
+        self.assertEqual(state["status"], "completed")
+        self.assertFalse(state["release_eligible"])
+        self.assertGreater(state["supply_warning"]["shortfall"], 0)
+
     def test_capacity_architect_revises_actual_schema_with_original_business_review(self):
         supply.attach_plan(self.wp, target(["L7_consolidation"], 1), 2, capacity_driven=True)
         before = deepcopy(self.wp)

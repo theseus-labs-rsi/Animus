@@ -1,7 +1,8 @@
 """Derive a source-bound world checkpoint without buying or relabeling old calls.
 
 Both source environments recompile the original accepted facts in separate,
-offline processes. This converts only completed business-value checkpoints;
+offline processes. This converts complete facts from a completed constructor
+or an ordinary agent stopped on a measured supply deficit;
 publication/corpus acceptance and their attempt counters are never migrated.
 """
 from copy import deepcopy
@@ -15,6 +16,17 @@ import sys
 
 VERSION = "world-checkpoint-source-migration/v1"
 EXECUTOR_VERSION = "business-value-executor/v1"
+AGENT_VERSION = "original-world-agent/v4"
+
+
+def admissible(state):
+    inventory = (state.get("upstream_request") or {}).get("inventory")
+    stopped_supply = (state.get("status") == "blueprint_review_requested"
+                      and not state.get("feedback_revision_required")
+                      and isinstance(inventory, dict) and inventory.get("shortfall", 0) > 0)
+    return ((state.get("version") == EXECUTOR_VERSION and state.get("status") == "completed")
+            or (state.get("version") == AGENT_VERSION
+                and (state.get("status") == "completed" or stopped_supply)))
 
 
 def digest(value):
@@ -45,9 +57,9 @@ def inspect_worker(root, checkpoint):
     source_before = sources()
 
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
-    if (state.get("version") != EXECUTOR_VERSION or state.get("status") != "completed"
+    if (not admissible(state)
             or state.get("checkpoint_hash") != digest({k: v for k, v in state.items() if k != "checkpoint_hash"})):
-        raise ValueError("Migration requires an intact completed business-value checkpoint")
+        raise ValueError("Migration requires an intact completed or supply-review construction checkpoint")
     wp = state["input_snapshot"]["whitepaper"]
     config.STRUCTURE_MODEL = state["binding"]["model"]
     if state["binding"]["existing_hash"] != digest(None):
@@ -58,13 +70,20 @@ def inspect_worker(root, checkpoint):
     for unit in state["units"]:
         if unit["raw_hash"] != digest(unit["raw"]):
             raise ValueError("Accepted unit raw facts changed")
-    table = instance_executor.assembled_facts(wp, state["units"], complete=True)
+    table = (instance_executor.assembled_facts(wp, state["units"], complete=True)
+             if state["version"] == EXECUTOR_VERSION else world_agent._combine(state["units"]))
     world, applied, initial, issues = world_agent._compiled(table, blueprint, None, True, wp)
+    if not issues:
+        from pipeline.seed_world import validate_seed_world
+        validate_seed_world(wp, world)
+    from pipeline.supply import inventory
+    capacity = inventory(wp, world) if wp.get("delivery_target") and not issues else None
     binding = world_agent._binding(wp, None)
     if sources() != source_before:
         raise ValueError("Compiler sources changed during inspection")
     return {"binding": binding, "table": table,
         "world": world.to_dict(), "applied": applied, "initial": initial, "issues": issues,
+        "inventory": capacity,
         "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
         "source_hashes": source_before, "provider_calls": 0}
 
@@ -82,6 +101,8 @@ def compare_inspections(state, old, current):
     for key in ("table", "world", "applied", "initial", "issues"):
         if old[key] != current[key]:
             raise ValueError("The target compiler changed the original accepted projection: " + key)
+    if old.get("inventory") != current.get("inventory"):
+        raise ValueError("The target compiler changed the original measured supply")
     if old["issues"]:
         raise ValueError("Original accepted facts do not pass the complete compiler")
 
@@ -105,9 +126,9 @@ def migrate(checkpoint, *, expected_sha256, legacy_root, target_root, destinatio
     if parent_sha != expected_sha256:
         raise ValueError("Original checkpoint differs from the externally supplied SHA")
     state = json.loads(parent_bytes)
-    if (state.get("version") != EXECUTOR_VERSION or state.get("status") != "completed"
+    if (not admissible(state)
             or state.get("checkpoint_hash") != digest({k: v for k, v in state.items() if k != "checkpoint_hash"})):
-        raise ValueError("Migration requires an intact completed business-value checkpoint")
+        raise ValueError("Migration requires an intact completed or supply-review construction checkpoint")
     if destination.exists():
         raise ValueError("Use a new destination; existing recovery evidence remains immutable")
     if destination.resolve().is_relative_to(legacy_root.resolve()):
@@ -128,6 +149,7 @@ def migrate(checkpoint, *, expected_sha256, legacy_root, target_root, destinatio
         "legacy_compiler_source_hashes": deepcopy(old["source_hashes"]),
         "target_compiler_source_hashes": deepcopy(current["source_hashes"]),
         "provider_calls": 0, "semantic_revalidation": False,
+        "supply_inventory": deepcopy(current.get("inventory")),
         "publication_or_signal_migration": False,
         "original_fields_hash": digest({k: v for k, v in state.items() if k not in ("binding", "checkpoint_hash")})}
     candidate.setdefault("implementation_migrations", []).append(deepcopy(proof))

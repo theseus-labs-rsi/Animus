@@ -109,7 +109,7 @@ def inventory(wp, world):
             "scope": "structural well-posed supply before wording and public-evidence review"}
 
 
-def finish_feedback(wp, world, state):
+def finish_feedback(wp, world, state, *, allow_supply_shortfall=False):
     """Request a bounded pre-publication supplement; retain a short world at cap."""
     if not wp.get("delivery_target"):
         return None
@@ -134,6 +134,12 @@ def finish_feedback(wp, world, state):
     history = state.setdefault("supply_observations", [])
     history.append(current)
     if current["shortfall"] <= 0:
+        return None
+    if allow_supply_shortfall:
+        # The caller has exhausted the upstream design budget. This is a
+        # delivery warning on an already compiled world, not a new repair loop.
+        state["supply_warning"] = {"code": "candidate_supply_target_unmet", **current}
+        state["release_eligible"] = False
         return None
     rounds = state.get("supply_supplement_rounds", 0)
     maximum = DeliveryTarget.from_dict(wp["delivery_target"]).max_supply_rounds

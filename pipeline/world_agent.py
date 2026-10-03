@@ -298,6 +298,15 @@ def _unit_issues(raw, context, world, blueprint):
     return issues
 
 
+def supply_shortfall_checkpoint(state):
+    """A stopped ordinary agent requested upstream review of measured supply."""
+    inventory = (state.get("upstream_request") or {}).get("inventory")
+    return (state.get("version") == VERSION
+            and state.get("status") == "blueprint_review_requested"
+            and not state.get("feedback_revision_required")
+            and isinstance(inventory, dict) and inventory.get("shortfall", 0) > 0)
+
+
 def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=None, log=print, resume_state=None,
                    repair_max_calls=None, allow_supply_shortfall=False):
     """Return (compiler-ready raw table, audited metadata); never publish a world."""
@@ -383,11 +392,18 @@ def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=Non
             world, applied, initial, integrity = _compiled(_combine(state["units"]), blueprint, existing, False, wp)
             if integrity:
                 raise WorldBlueprintError("accepted checkpoint has invalid prefix: " + "; ".join(integrity))
-            if state["status"] == "completed":
-                _, applied, initial, issues = _compiled(_combine(state["units"]), blueprint, existing, True, wp)
+            retain_shortfall = allow_supply_shortfall and supply_shortfall_checkpoint(state)
+            if state["status"] == "completed" or retain_shortfall:
+                world, applied, initial, issues = _compiled(_combine(state["units"]), blueprint, existing, True, wp)
                 if issues:
                     raise WorldBlueprintError("completed checkpoint failed full compilation: " + "; ".join(issues))
                 validate_seed_world(wp, world)
+                if retain_shortfall:
+                    from pipeline.supply import finish_feedback
+                    finish_feedback(wp, world, state, allow_supply_shortfall=True)
+                    state.update(status="completed", initial_states=initial, result_hash=_digest(applied),
+                                 feedback_revision_required=False)
+                    save()
                 return applied, deepcopy(state)
             if state["steps"] >= max_steps:
                 raise WorldBlueprintError(f"world agent planning step budget exhausted ({max_steps})")
@@ -494,7 +510,8 @@ def generate_world(wp, tracer, existing=None, checkpoint_path=None, feedback=Non
                     else:
                         if wp.get("delivery_target"):
                             from pipeline.supply import finish_feedback
-                            feedback = finish_feedback(wp, world, state)
+                            feedback = finish_feedback(wp, world, state,
+                                                       allow_supply_shortfall=allow_supply_shortfall)
                             if feedback is not None:
                                 state["observation"] = feedback
                                 save()

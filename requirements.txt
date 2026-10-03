@@ -87,7 +87,7 @@ PyPika
 pyproject_hooks
 python-dateutil
 python-discovery
-python-dotenv
+python-dotenv==1.2.2
 pytz
 PyYAML
 qdrant-client

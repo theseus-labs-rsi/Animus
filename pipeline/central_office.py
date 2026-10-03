@@ -26,6 +26,7 @@ from pipeline.seed_pack import (
     attach_seed_contract,
     core_requirements,
     seed_context,
+    project_required_blueprint,
     validate_seed_blueprint,
     validate_seed_pack,
 )
@@ -45,6 +46,30 @@ STYLE_SYS = render("council.style")
 TRAPS_SYS = render("council.traps")
 WORLD_SYS = render("council.world")
 WORLD_REPAIR_SYS = render("council.world_repair")
+WORLD_BUSINESS_REPAIR_SYS = WORLD_SYS + """
+【业务可执行性修订】
+根据本轮业务复核的具体缺口修订候选蓝图。补齐事件的角色、可写效果和必要业务结构，让任务要求的过程与跨期轨迹能够实际发生。先逐项核对复核意见，再输出完整 world_blueprint。
+seed 的必需结构保留原 id、label、角色、效果、约束和因果引用；新增角色、效果或事件按领域含义扩展，已有 label 原文保留。observe 冻结字段、实体与期数上限以及逐线容量要求继续适用。已通过的结构保留，修订集中在本轮指出的缺口及其必要依赖。
+"""
+
+
+def _world_revision_messages(error, candidate, observed_contract, seed_prompt, *,
+                             business=False, preserve_business_additions=False):
+    """Route executable-business feedback to the architect before schema repair."""
+    if business:
+        system = WORLD_BUSINESS_REPAIR_SYS
+        user = ("【业务复核意见】\n" + error + "\n【待修候选】\n"
+                + json.dumps(candidate, ensure_ascii=False)
+                + "\n逐项修订业务缺口，输出完整 JSON。")
+    else:
+        system = WORLD_REPAIR_SYS
+        if preserve_business_additions:
+            system += ("\n本候选包含上一轮业务修订新增的结构。机械修理仅改错误清单指出的字段及必要引用；"
+                       "保留其余合法角色、效果和事件。label 错误仅恢复 label，保留已合法的新增 effect_fields。")
+        user = render("council.world_repair_user", errors=error,
+                      candidate=json.dumps(candidate, ensure_ascii=False))
+    user += f"\n【每轮都必须完整保留的 observe 冻结清单】\n{observed_contract}" + seed_prompt
+    return system, user
 
 # ── 综合 + 批判 ──────────────────────────────────────────────────────────
 CRITIC_SYS = render("council.critic", taxonomy=taxonomy_prose())   # ★critic 也内联 canonical 菜单(014559:critic 重写丢 L7+自编名,根在它没拿到菜单)
@@ -67,8 +92,9 @@ _MAP_LINE_IDS = tuple(
 )
 
 
-def _map_issues(candidate: dict) -> list[str]:
+def _map_issues(candidate: dict, expected_lines=None) -> list[str]:
     """检查能力映射是否对 L1–L7 完整、唯一且可执行。"""
+    expected_lines = tuple(expected_lines or _MAP_LINE_IDS)
     if not isinstance(candidate, dict) or "__error__" in candidate:
         return [f"map 调用失败:{(candidate or {}).get('__error__', '非 JSON object') if isinstance(candidate, dict) else '非 JSON object'}"]
     per_line = candidate.get("per_line")
@@ -83,7 +109,7 @@ def _map_issues(candidate: dict) -> list[str]:
         raw_id = item.get("line")
         line = line_for(raw_id) if isinstance(raw_id, str) else None
         line_id = line.id if line else None
-        if line_id not in _MAP_LINE_IDS or raw_id != line_id:
+        if line_id not in expected_lines or raw_id != line_id:
             issues.append(f"per_line[{index}].line 必须是 L1–L7 canonical id，实际={raw_id!r}")
             continue
         seen[line_id] = seen.get(line_id, 0) + 1
@@ -97,8 +123,8 @@ def _map_issues(candidate: dict) -> list[str]:
             weight = item.get("weight_hint")
             if not isinstance(weight, (int, float)) or isinstance(weight, bool) or not 0 < float(weight) <= 1:
                 issues.append(f"{line_id} 适用时 weight_hint 必须在 (0,1]")
-    missing = [line_id for line_id in _MAP_LINE_IDS if seen.get(line_id, 0) == 0]
-    duplicate = [line_id for line_id in _MAP_LINE_IDS if seen.get(line_id, 0) > 1]
+    missing = [line_id for line_id in expected_lines if seen.get(line_id, 0) == 0]
+    duplicate = [line_id for line_id in expected_lines if seen.get(line_id, 0) > 1]
     if missing:
         issues.append(f"缺失产线:{missing}")
     if duplicate:
@@ -578,7 +604,22 @@ def _canonicalize_lines(wp: dict, draft: dict, log=print):
         log(f"    议会·canonical 化:改名 {renamed or '无'} / 丢弃不可识别 {dropped or '无'} / 补漏 {backfilled or '无'}")
 
 
-def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None) -> dict:
+class CouncilExecutionError(RuntimeError):
+    """A returned call failure must not enter the content revision loop."""
+    def __init__(self, step, result):
+        self.step, self.result = step, deepcopy(result)
+        super().__init__(f"{step} execution failed: {result['__error__']}")
+
+
+def _require_call_result(result, step):
+    if isinstance(result, dict) and "__error__" in result:
+        raise CouncilExecutionError(step, result)
+    return result
+
+
+def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None, delivery_brief=None,
+                   max_world_attempts=6, revision_of=None, design_feedback=None,
+                   defer_business_review=False) -> dict:
     """先冻结世界骨架，再做能力映射；可选真实任务种子在冻结前过承接硬门。"""
     pack = validate_seed_pack(seed_pack) if seed_pack is not None else None
     seed_prompt = ("\n【真实任务种子：经过策展的生成约束】\n"
@@ -597,6 +638,10 @@ def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None) -> dict
             "未决内容保持未决；能力建议需结合实际结构选择。原始审计记录与评测材料未进入本次输入。"
             "解题需要的业务规则应安排在后续公开文档或公开协议中表达。\n"
             + json.dumps(core_requirements(pack), ensure_ascii=False))
+    if delivery_brief is not None:
+        seed_prompt += ("\n【本轮交付规模与生产储备】\n" + json.dumps(delivery_brief, ensure_ascii=False)
+                        + "\n请在白皮书阶段为适用能力安排独立对象、关系和多期过程，说明供给依据。"
+                        "新结构需符合任务背景和来源约束；保留未知及拒答条件。实体上限与期数见 world_limits。")
     fs = json.dumps(few_shot, ensure_ascii=False)
     def _view(p):                                         # 7 视角彼此独立 → 并发
         key, sysp, ask = p
@@ -608,10 +653,15 @@ def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None) -> dict
             retries=1 if key == "traps" else 3,
             strict_json=key == "traps")
         ok = isinstance(out, dict) and "__error__" not in out
+        if key != "traps":
+            _require_call_result(out, f"council.{key}")
         log(f"    议会·{key} {'✓' if ok else '⚠失败'}")
         return key, (out if isinstance(out, dict) else {})
-    foundations = [p for p in _PERSPECTIVES if p[0] not in ("map", "world")]
-    views = dict(config.pmap(_view, foundations, workers=len(foundations)))
+    if revision_of is None:
+        foundations = [p for p in _PERSPECTIVES if p[0] not in ("map", "world")]
+        views = dict(config.pmap(_view, foundations, workers=len(foundations)))
+    else:
+        views = deepcopy(revision_of["_council_views"])
     seed_reference_fields = None
     seed_required_fields = None
     if pack is not None:
@@ -630,8 +680,10 @@ def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None) -> dict
                  "skeptic 只作带置信度的候选，需自行裁决；medium 用来校准证据生态。\n"
                  + json.dumps({k: views.get(k) for k in ("observe", "skeptic", "medium")}, ensure_ascii=False))
     # 架构师输出先过机械硬门；把明确错误与完整 observe 冻结清单共同回喂，避免修一处忘一处。
-    world_out: dict = {}
-    world_error = ""
+    world_out: dict = deepcopy(revision_of["world_blueprint"]) if revision_of is not None else {}
+    world_error = json.dumps(design_feedback, ensure_ascii=False) if design_feedback is not None else ""
+    world_error_is_business = revision_of is not None
+    business_repair_seen = False
     feasibility_reviews = []
     observed_contract = json.dumps(
         {"observed_fields": (views.get("observe") or {}).get("observed_fields") or [],
@@ -643,20 +695,27 @@ def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None) -> dict
         + _observed_strings((views.get("medium") or {}).get("recommended_mix"))
         + _observed_strings((views.get("medium") or {}).get("common_media"))
     )
-    for world_attempt in range(1, 7):
-        first_pass = world_attempt == 1
-        system = WORLD_SYS if first_pass else WORLD_REPAIR_SYS
-        user = (render("council.view_user", desc=desc, fs=fs, ask=world_ask)
-                if first_pass else render(
-                    "council.world_repair_user", errors=world_error,
-                    candidate=json.dumps(world_out, ensure_ascii=False))
-                    + f"\n【每轮都必须完整保留的 observe 冻结清单】\n{observed_contract}")
-        # Include the complete seed contract on every repair; a fix must not
-        # silently discard the real task's required structure.
-        user += seed_prompt
+    if not 1 <= max_world_attempts <= 6:
+        raise ValueError("world author attempts must be between one and six")
+    for world_attempt in range(1, max_world_attempts + 1):
+        first_pass = world_attempt == 1 and revision_of is None
+        if first_pass:
+            system = WORLD_SYS
+            user = render("council.view_user", desc=desc, fs=fs, ask=world_ask) + seed_prompt
+        else:
+            system, user = _world_revision_messages(
+                world_error, world_out, observed_contract, seed_prompt,
+                business=world_error_is_business,
+                preserve_business_additions=business_repair_seen)
+            business_repair_seen = business_repair_seen or world_error_is_business
+        world_error_is_business = False
+        if delivery_brief and delivery_brief.get("version") == 2:
+            system += "\n逐线候选配额须落实到独立业务案例、关系链、跨期轨迹和状态对象。候选容量不足时调整世界结构和实例数量，保持seed硬约束、exact基数及授权实体/期数上限；先通过容量检查再冻结蓝图。line_constructions逐线说明承载方案。"
         candidate = tracer.chat_json("council.world" if first_pass else "council.world_repair",
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.5 if world_attempt == 1 else 0.2, max_tokens=30000)
+            temperature=0.5 if world_attempt == 1 else 0.2, max_tokens=30000,
+            complete_containers=True)
+        _require_call_result(candidate, "council.world" if first_pass else "council.world_repair")
         repair_args = (candidate if isinstance(candidate, dict) else {},
                        views.get("observe") or {}, evidence_hints)
         if pack is None:
@@ -667,6 +726,10 @@ def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None) -> dict
                 seed_required_fields=seed_required_fields)
         if mechanical_repairs:
             log(f"    议会·world 候选机械归一:{mechanical_repairs}")
+        if pack is not None and defer_business_review:
+            world_out, seed_repairs = project_required_blueprint(world_out, pack)
+            if seed_repairs:
+                log(f"    议会·seed 必需声明投影:{seed_repairs}")
         try:
             blueprint = normalize_world_blueprint(world_out)
         except WorldBlueprintError as error:
@@ -678,6 +741,13 @@ def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None) -> dict
             world_error = "world_blueprint 未承接 few-shot 硬事实:\n- " + "\n- ".join(observed_issues)
             log(f"    议会·world 第{world_attempt}轮未通过观察闭包:{world_error}")
             continue
+        if delivery_brief and delivery_brief.get("version") == 2:
+            from pipeline.supply_capacity import blueprint_capacity_report
+            capacity = blueprint_capacity_report(blueprint, delivery_brief)
+            if capacity["issues"]:
+                world_error = "逐线候选容量与授权规模冲突：" + json.dumps(capacity, ensure_ascii=False)
+                log(f"    议会·world 第{world_attempt}轮容量规划需修订")
+                continue
         if pack is not None:
             seed_report = validate_seed_blueprint(blueprint, pack)
             if not seed_report["passed"]:
@@ -685,18 +755,20 @@ def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None) -> dict
                 log(f"    议会·world 第{world_attempt}轮未通过种子承接:{world_error}")
                 continue
             log(f"    议会·seed ✓({pack['seed_id']};结构承接验证)")
-            from pipeline.blueprint_feasibility import assess
-            review_wp = attach_seed_contract({"world_blueprint": blueprint}, pack)
-            review = assess(review_wp, tracer)
-            feasibility_reviews.append(review)
-            if review["decision"] != "accept":
-                world_error = "业务可执行性复核尚未通过：" + json.dumps(review["review"], ensure_ascii=False)
-                log(f"    议会·world 第{world_attempt}轮需修订业务约束:{world_error}")
-                continue
+            if not defer_business_review:
+                from pipeline.blueprint_feasibility import assess
+                review_wp = attach_seed_contract({"world_blueprint": blueprint}, pack)
+                review = assess(review_wp, tracer)
+                feasibility_reviews.append(review)
+                if review["decision"] != "accept":
+                    world_error = "业务可执行性复核尚未通过：" + json.dumps(review["review"], ensure_ascii=False)
+                    world_error_is_business = True
+                    log(f"    议会·world 第{world_attempt}轮需修订业务约束:{world_error}")
+                    continue
         log(f"    议会·world ✓(综合前置材料;第{world_attempt}轮)")
         break
     else:
-        raise WorldBlueprintError("world 架构师六轮后仍未通过机械/观察/种子/业务可执行性校验:" + world_error)
+        raise WorldBlueprintError(f"world 架构师{max_world_attempts}轮后仍未通过机械/观察/种子/业务可执行性校验:" + world_error)
     # world 是能力映射的前置条件：先机械验骨架，再让 map 只判断哪些能力天然可读。
     views["world"] = {"world_blueprint": deepcopy(blueprint)}
     if feasibility_reviews:
@@ -713,13 +785,20 @@ def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None) -> dict
                     + "\n- ".join(map_errors)
                     + "\n【上轮候选】\n"
                     + json.dumps(map_out, ensure_ascii=False))
+        map_system = MAP_SYS
+        expected_lines = _MAP_LINE_IDS
+        if delivery_brief is not None:
+            from pipeline.delivery_target import LINE_IDS
+            expected_lines = LINE_IDS
+            map_system = MAP_SYS.replace("L1–L7", "L1–L10")
+            ask += "\n逐条覆盖以下 canonical IDs，逐线说明适用结构或缺口：" + json.dumps(list(expected_lines))
         candidate = tracer.chat_json(
             "council.map" if map_attempt == 1 else "council.map_repair",
-            [{"role": "system", "content": MAP_SYS},
+            [{"role": "system", "content": map_system},
              {"role": "user", "content": render("council.view_user", desc=desc, fs=fs, ask=ask) + seed_prompt}],
             temperature=0.6 if map_attempt == 1 else 0.2, max_tokens=8192)
         map_out = candidate if isinstance(candidate, dict) else {}
-        map_errors = _map_issues(map_out)
+        map_errors = _map_issues(map_out, expected_lines)
         if not map_errors:
             log(f"    议会·map ✓(world-first;第{map_attempt}轮;L1–L7 完整)")
             break
@@ -728,6 +807,8 @@ def central_office(desc, few_shot, tracer, log=print, *, seed_pack=None) -> dict
         raise WorldBlueprintError("map 三轮后仍未满足 L1–L7 完整性契约:\n- "
                                   + "\n- ".join(map_errors))
     views["map"] = map_out
+    views["world_author_attempts"] = (world_attempt if revision_of is None else
+                                      revision_of["_council_views"]["world_author_attempts"] + world_attempt)
 
     draft = _assemble_whitepaper(views, desc)             # ★代码确定性装配；world 视角非法则在这里明确失败
     log(f"    议会·综合(代码装配)✓ active_lines={[l['line'] for l in draft['active_lines']]}")

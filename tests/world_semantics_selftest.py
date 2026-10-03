@@ -104,6 +104,71 @@ class WorldSemanticsTests(unittest.TestCase):
         result = review.review_world(self.wp, self.ws, tracer, task_input=self.task, **kwargs)
         return result, tracer
 
+    def downstream_envelope(self, previous):
+        # A protocol fixture, not a claim that the test opinion came from a provider.
+        body = {"version": "verified-downstream-evidence/v1", "offline_only": True,
+                "new_provider_calls": 0, "new_world_opinion": False,
+                "paid_resume_authorization": False,
+                "world_hash": review._hash(self.ws.to_dict()),
+                "whitepaper_hash": review._hash(self.wp),
+                "original_task_hash": review._hash(self.task),
+                "historical_passed_review_hash": review._hash(previous),
+                "historical_world_review_status": "passed",
+                "historical_negative_public_review": {"status": "failed"},
+                "downstream_negative_reviews": [
+                    {"call_id": "offline-fixture-call", "negative_opinion": {"verdict": "fail"}}]}
+        return {**body, "envelope_hash": review._hash(body)}
+
+    def test_verified_downstream_evidence_is_separate_from_author_response(self):
+        previous, _ = self.run_review()
+        envelope = self.downstream_envelope(previous)
+        result, tracer = self.run_review(previous=previous, downstream_evidence=envelope)
+        self.assertEqual(result["status"], "passed")  # scripted opinion, not semantic acceptance
+        self.assertEqual(review.validate_review(result, self.wp, self.ws, self.task), [])
+        self.assertEqual(len(tracer.calls), 1)
+        payload = json.loads(tracer.calls[0]["messages"][-1]["content"])
+        self.assertEqual(payload["downstream_review_evidence"], envelope)
+        self.assertIsNone(payload["author_responses"])
+        self.assertIn("独立核对", tracer.calls[0]["messages"][0]["content"])
+        self.assertEqual(result["binding"]["downstream_evidence_hash"], review._hash(envelope))
+        nodes = review._scoped_review_context(payload).nodes
+        self.assertIn("downstream/summary", nodes)
+        self.assertIn("downstream/public_review", nodes)
+        self.assertIn("downstream/body/0", nodes)
+        self.assertNotIn("downstream_review_evidence", nodes)
+
+    def test_downstream_evidence_rejects_stale_or_edited_inputs_before_provider(self):
+        previous, _ = self.run_review()
+        envelope = self.downstream_envelope(previous)
+        mutants = []
+        changed = deepcopy(envelope); changed["downstream_negative_reviews"][0]["call_id"] = "edited"
+        mutants.append(changed)
+        changed = deepcopy(envelope); changed["world_hash"] = "0" * 64
+        changed["envelope_hash"] = review._hash({k: v for k, v in changed.items() if k != "envelope_hash"})
+        mutants.append(changed)
+        changed = deepcopy(envelope); changed["historical_passed_review_hash"] = "0" * 64
+        changed["envelope_hash"] = review._hash({k: v for k, v in changed.items() if k != "envelope_hash"})
+        mutants.append(changed)
+        changed = deepcopy(envelope); changed["downstream_negative_reviews"][0]["negative_opinion"]["verdict"] = "pass"
+        changed["envelope_hash"] = review._hash({k: v for k, v in changed.items() if k != "envelope_hash"})
+        mutants.append(changed)
+        for evidence in mutants:
+            with self.subTest(evidence=evidence):
+                result, tracer = self.run_review(previous=previous, downstream_evidence=evidence)
+                self.assertEqual(result["status"], "error")
+                self.assertEqual(tracer.calls, [])
+
+    def test_downstream_evidence_keeps_default_messages_and_checkpoint_inputs(self):
+        previous, _ = self.run_review()
+        default, _, _ = review._inputs(self.wp, self.ws, self.task, previous, None)
+        self.assertNotIn("downstream_review_evidence", default)
+        self.assertEqual(review._review_system(False), review._system(False))
+        plain = review._review_checkpoint_inputs(self.wp, self.ws, self.task, previous, None, "model")
+        self.assertNotIn("downstream_evidence", plain)
+        evidence = self.downstream_envelope(previous)
+        bound = review._review_checkpoint_inputs(self.wp, self.ws, self.task, previous, None, "model", evidence)
+        self.assertEqual(bound["downstream_evidence"], evidence)
+
     def test_one_original_tracer_call_exact_params_and_full_prepared_world(self):
         result, tracer = self.run_review()
         self.assertEqual(result["status"], "passed")

@@ -222,35 +222,44 @@ def apply_initial_states(merged, structure, blueprint, existing_names=(), previo
         del entity["fields"][row["field"]]
     occupied = set()
     for row in rows:
-        if (not isinstance(row, dict) or set(row) != {"entity", "field", "session", "value"}
-                or not isinstance(row["entity"], str) or not isinstance(row["field"], str)
-                or type(row["session"]) is not int or row["session"] != 0):
-            raise WorldBlueprintError("initial state requires entity/field/value and integer session 0")
-        name, field, value = row["entity"], row["field"], row["value"]
-        if name in existing_names or name not in by_name:
-            raise WorldBlueprintError("initial state may only address this build's new entities")
-        entity = by_name[name]
-        tid = entity["type"]
-        if field not in event_fields.get(tid, set()) - relation_fields.get(tid, set()):
-            raise WorldBlueprintError("initial state must be event-owned and not relation-owned")
-        if (name, field) in occupied or field in entity.get("fields", {}):
-            raise WorldBlueprintError("initial state duplicate or already-written field")
-        occupied.add((name, field))
-        decl = field_specs[tid][field]
-        if (isinstance(value, (dict, list, bool)) or value is None
-                or not isinstance(value, (str, int, float)) or not str(value).strip()):
-            raise WorldBlueprintError("initial state value must be a nonempty scalar of the declared kind")
-        if decl.get("kind") == "numeric":
-            number, _ = parse_number(value, decl.get("unit"))
-            if decl.get("range") and not decl["range"][0] <= number <= decl["range"][1]:
-                raise WorldBlueprintError("initial state numeric value outside declared range")
-        elif not isinstance(value, str):
-            raise WorldBlueprintError("initial state nonnumeric value must be a string")
-        if decl.get("kind") == "date":
-            parse_date(value)
-        if decl.get("states") and value not in decl["states"]:
-            raise WorldBlueprintError("initial state value outside declared states")
-        entity.setdefault("fields", {})[field] = {"type": "stable", "value": value}
+        try:
+            if (not isinstance(row, dict) or set(row) != {"entity", "field", "session", "value"}
+                    or not isinstance(row["entity"], str) or not isinstance(row["field"], str)
+                    or type(row["session"]) is not int or row["session"] != 0):
+                raise WorldBlueprintError("initial state requires entity/field/value and integer session 0")
+            name, field, value = row["entity"], row["field"], row["value"]
+            if name in existing_names or name not in by_name:
+                raise WorldBlueprintError("initial state may only address this build's new entities")
+            entity = by_name[name]
+            tid = entity["type"]
+            if field not in event_fields.get(tid, set()) - relation_fields.get(tid, set()):
+                raise WorldBlueprintError("initial state must be event-owned and not relation-owned")
+            if (name, field) in occupied or field in entity.get("fields", {}):
+                raise WorldBlueprintError("initial state duplicate or already-written field")
+            occupied.add((name, field))
+            decl = field_specs[tid][field]
+            if (isinstance(value, (dict, list, bool)) or value is None
+                    or not isinstance(value, (str, int, float)) or not str(value).strip()):
+                raise WorldBlueprintError("initial state value must be a nonempty scalar of the declared kind")
+            if decl.get("kind") == "numeric":
+                number, _ = parse_number(value, decl.get("unit"))
+                if decl.get("range") and not decl["range"][0] <= number <= decl["range"][1]:
+                    raise WorldBlueprintError("initial state numeric value outside declared range")
+            elif not isinstance(value, str):
+                raise WorldBlueprintError("initial state nonnumeric value must be a string")
+            if decl.get("kind") == "date":
+                parse_date(value)
+            if decl.get("states") and value not in decl["states"]:
+                raise WorldBlueprintError("initial state value outside declared states")
+            entity.setdefault("fields", {})[field] = {"type": "stable", "value": value}
+        except ValueError as error:
+            name = row.get("entity") if isinstance(row, dict) else None
+            field = row.get("field") if isinstance(row, dict) else None
+            declaration = (field_specs.get(by_name.get(name, {}).get("type"), {}).get(field, {})
+                           if isinstance(name, str) and isinstance(field, str) else {})
+            detail = {"entity": name, "field": field, "session": row.get("session") if isinstance(row, dict) else None,
+                      "declared_field": declaration, "received_value": row.get("value") if isinstance(row, dict) else row}
+            raise type(error)(str(error) + "; initial_state=" + json.dumps(detail, ensure_ascii=False)) from error
     for event in structure.get("events", []):
         if isinstance(event, dict) and event.get("session") == 0:
             for effect in event.get("effects", []):

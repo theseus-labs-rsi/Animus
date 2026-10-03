@@ -17,7 +17,6 @@ import uuid
 import hashlib
 import asyncio
 import math
-from contextvars import copy_context
 from pathlib import Path
 from llm_trace import emit, redact
 
@@ -151,8 +150,27 @@ def is_retryable_chat_error(exc):
                     "usage_limit_reached", "monthly_budget_exceeded", "content_policy_violation"}:
             return False
         status = getattr(exc, "status_code", None)
+        if status == 400 and isinstance(details, dict):
+            # This relay occasionally returns a generic InvalidParameter for an
+            # otherwise identical request that succeeds on replay.  Retry only
+            # that exact ambiguous form, within chat_json's existing attempt cap.
+            message = details.get("message")
+            return (code == "InvalidParameter" and details.get("param") in (None, "")
+                    and isinstance(message, str)
+                    and message.startswith("A parameter specified in the request is not valid Request id:"))
         return type(status) is int and (status in (408, 429) or 500 <= status <= 599)
     return False
+
+
+def is_clean_header_deadline(exc):
+    """A closed local request that received no HTTP headers can be resent explicitly.
+
+    The remote may still charge for it, so callers must retain its reservation.
+    Body timeouts and unclassified deadlines never qualify.
+    """
+    return (isinstance(exc, CallDeadlineError)
+            and exc.phase == "awaiting_http_headers"
+            and exc.local_cleanup_confirmed is True)
 
 
 def _completion_text(response):
@@ -280,6 +298,8 @@ def _perform_request(*, model, messages, parameters, http_timeout, deadline_s, l
 def chat(messages, temperature=0.7, top_p=1.0, max_tokens=4096, model=None, *, response_format=None,
          transport=None):
     """限并发/总时间；可选显式 transport，默认保持旧请求参数。"""
+    from execution_control import check_stop
+    check_stop()
     effective_model = model or MODEL
     deadline_s, resolved_transport = DEADLINE_S, None
     http_timeout = httpx.Timeout(HTTP_READ_TIMEOUT_S, connect=15.0, write=30.0, pool=15.0)
@@ -330,7 +350,11 @@ def chat(messages, temperature=0.7, top_p=1.0, max_tokens=4096, model=None, *, r
         emit(event, secrets=secrets, call_id=call_id,
              elapsed_ms=round((time.monotonic() - dispatched) * 1000), **fields)
     response_record = None
+    physical_started = False
     try:
+        # A queued call has not been dispatched yet. A sibling's global stop
+        # closes this boundary after the semaphore wait as well.
+        check_stop()
         emit("request", secrets=secrets, call_id=call_id, messages=messages,
              model=effective_model, endpoint_hash=hashlib.sha256((BASE_URL or "").encode()).hexdigest(),
              logical_parameters={"temperature": temperature, "top_p": top_p, "max_tokens": max_tokens,
@@ -339,6 +363,7 @@ def chat(messages, temperature=0.7, top_p=1.0, max_tokens=4096, model=None, *, r
              request_deadline_remaining_s=remaining_deadline_s,
              transport=resolved_transport, sdk_options=sdk_options,
              lifecycle="cancellable_async_http/v1", input_chars=input_chars, actual_output_cap=cap)
+        physical_started = True
         response = _perform_request(model=effective_model, messages=messages, parameters=request_parameters,
             http_timeout=http_timeout, deadline_s=remaining_deadline_s, lifecycle=lifecycle,
             explicit_profile=bool(resolved_transport and resolved_transport["profile"] is not None))
@@ -347,6 +372,12 @@ def chat(messages, temperature=0.7, top_p=1.0, max_tokens=4096, model=None, *, r
              elapsed_ms=round((time.monotonic() - started) * 1000))
         return _completion_text(response)
     except Exception as exc:
+        from execution_control import observe_failure, global_failure
+        observe_failure(exc)
+        if global_failure(exc) and not physical_started:
+            # A cooperative stop before dispatch creates no physical request.
+            if getattr(exc, "global_stop", False):
+                raise
         exc.call_id, exc.token_cap, exc.input_chars = call_id, cap, input_chars
         exc.kind = chat_error_kind(exc)
         exc.response_received = response_record is not None
@@ -372,17 +403,58 @@ def _strip_code_fence(text):
     return m.group(1).strip() if m else text
 
 
+def parse_complete_json(text, *, complete_containers=False):
+    """Parse one JSON value; optionally close only unfinished containers at EOF.
+
+    No keys, values, separators or string contents are supplied. An incomplete
+    string, mismatched delimiter or incomplete value retains its syntax error.
+    The returned suffix is an explicit receipt for lossless framing completion.
+    """
+    try:
+        return json.loads(text), ""
+    except json.JSONDecodeError as original:
+        if not complete_containers or original.pos != len(text.rstrip()):
+            raise
+        stack = []
+        quoted = escaped = False
+        for char in text:
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    quoted = False
+            elif char == '"':
+                quoted = True
+            elif char in "{[":
+                stack.append("}" if char == "{" else "]")
+            elif char in "}]":
+                if not stack or stack.pop() != char:
+                    raise original
+        if quoted or not stack:
+            raise original
+        suffix = "".join(reversed(stack))
+        try:
+            return json.loads(text + suffix), suffix
+        except json.JSONDecodeError:
+            raise original
+
+
 def chat_json(messages, temperature=0.7, max_tokens=4096, retries=3,
               retry_delay_base=3.0, model=None, strict_json=False, *, top_p=1.0,
               response_format=None, transport=None, retry_parse_feedback=True,
-              max_output_tokens=None):
+              max_output_tokens=None, complete_containers=False,
+              retry_clean_header_deadline=False):
     """调用 LLM 并把回复解析成 JSON 对象。
 
     暂时连接故障和 JSON 语法错误可重试。截断仅在显式 max_output_tokens
-    允许提高实际额度时重试；总截止、读超时、空正文不重复相同工作。
+    允许提高实际额度时重试；总截止默认不重试。显式 opt-in 仅允许本地已关闭、
+    尚未收到 HTTP 响应头的截止重试；读到响应体后的截止、读超时、空正文不重试。
     明确拒绝、鉴权、参数、预算及本地审计错误立即终止，不重复发送请求。
     推理模型偶尔会在 JSON 外面带点话或裹代码块,做"剥壳 + 抓第一个 {..}/[..]" 容错。
     ``strict_json=True`` 时只接受去掉代码围栏后的完整 JSON，不抓子串、不修语法；
+    作者可显式启用 ``complete_containers``，只补完整值之后缺失的结尾括号并留痕。
     与 ``retries=1`` 合用可形成单次、无修复的硬协议。
     ``top_p=None`` 显式省略该传输参数；不按模型名推测参数兼容性。
     ``response_format`` 仅显式提供时透传；JSON 模式不替代严格解析/语义验收。
@@ -399,6 +471,8 @@ def chat_json(messages, temperature=0.7, max_tokens=4096, retries=3,
         raise ValueError("max_output_tokens must be an integer at least max_tokens")
     if not math.isfinite(retry_delay_base) or retry_delay_base < 0:
         raise ValueError("retry_delay_base must be finite and nonnegative")
+    if type(retry_clean_header_deadline) is not bool:
+        raise ValueError("retry_clean_header_deadline must be a boolean")
     transport_kwargs = {}
     if transport is not None:
         from llm_transport import validate_transport, build_request_parameters
@@ -424,8 +498,10 @@ def chat_json(messages, temperature=0.7, max_tokens=4096, retries=3,
                        model=model, top_p=top_p, response_format=response_format, **transport_kwargs)
             cleaned = _strip_code_fence(raw)
             try:
-                parsed = json.loads(cleaned)
-                emit("json_result", secrets=_trace_secrets(), attempt_id=attempt_id, parse_mode="complete", parsed=parsed)
+                parsed, suffix = parse_complete_json(cleaned, complete_containers=complete_containers)
+                emit("json_result", secrets=_trace_secrets(), attempt_id=attempt_id,
+                     parse_mode="container_completion" if suffix else "complete",
+                     **({"raw_output": raw, "appended_suffix": suffix} if suffix else {}), parsed=parsed)
                 return parsed
             except json.JSONDecodeError as e:
                 last_err = e
@@ -455,7 +531,8 @@ def chat_json(messages, temperature=0.7, max_tokens=4096, retries=3,
                 raise last_err
         except Exception as e:
             last_err = e
-            retryable = isinstance(e, json.JSONDecodeError) or is_retryable_chat_error(e)
+            retryable = (isinstance(e, json.JSONDecodeError) or is_retryable_chat_error(e)
+                         or (retry_clean_header_deadline and is_clean_header_deadline(e)))
             next_cap = current_cap
             retry_action = "json_feedback" if isinstance(e, json.JSONDecodeError) else "transient_backoff"
             if isinstance(e, CompletionOutputError):
@@ -463,6 +540,8 @@ def chat_json(messages, temperature=0.7, max_tokens=4096, retries=3,
                 next_cap = min(actual_cap * 2, max_output_tokens or actual_cap)
                 retryable = e.kind == "output_truncated" and next_cap > actual_cap
                 retry_action = "increase_output_cap" if retryable else "stop_output_failure"
+            elif retry_clean_header_deadline and is_clean_header_deadline(e):
+                retry_action = "resend_after_clean_header_deadline"
             emit("json_error", secrets=_trace_secrets(), attempt_id=attempt_id,
                  error_type=type(e).__name__, error=str(e), raw_output=raw, retryable=retryable,
                  kind=getattr(e, "kind", "json_syntax" if isinstance(e, json.JSONDecodeError) else type(e).__name__),
@@ -502,15 +581,9 @@ def chat_json(messages, temperature=0.7, max_tokens=4096, retries=3,
         cause=last_err, attempts=attempts, token_cap=getattr(last_err, "token_cap", None) or current_cap) from last_err
 
 
-from concurrent.futures import ThreadPoolExecutor
 
 
-def pmap(fn, items, workers: int = 6):
-    """把【彼此独立的 LLM 调用】并发跑(网络 I/O 密集 → 线程池即可,GIL 在等网络时释放)。
-    保序返回 list;workers 控并发上限(别太大,免得把抽风的 API 挤爆)。fn 内异常会向上抛。"""
-    items = list(items)
-    if not items:
-        return []
-    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(items)))) as ex:
-        pending = [ex.submit(copy_context().run, fn, item) for item in items]
-        return [future.result() for future in pending]
+def pmap(fn, items, workers: int = 6, *, on_result=None):
+    """保序、按并发窗口派发；失败后保留在途结果，不再提交整批后续任务。"""
+    from execution_control import bounded_map
+    return bounded_map(fn, items, workers, on_result=on_result)

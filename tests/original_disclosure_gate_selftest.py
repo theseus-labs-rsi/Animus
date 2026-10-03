@@ -52,7 +52,13 @@ class DisclosureGateTests(unittest.TestCase):
         failure = {'status': 'failed', 'repair_targets': {'intrinsic': [], 'structure': True}}
         def plan(wp, ws, tracer, **kwargs):
             values.append(ws.entities['Project']['status'].latest_valid())
-            self.assertEqual(kwargs['feedback'], failure if len(values) == 2 else None)
+            feedback = kwargs['feedback']
+            if len(values) == 2:
+                self.assertEqual(feedback['status'], failure['status'])
+                self.assertEqual(feedback['repair_targets'], failure['repair_targets'])
+                self.assertEqual(feedback['source_review_hash'], factory._canonical_hash(failure))
+            else:
+                self.assertIsNone(feedback)
             return {'status': 'ready'}
         with patch.object(factory, 'build_world', side_effect=self.builder), \
              patch.object(factory, '_prepare_lines'), \
@@ -83,7 +89,10 @@ class DisclosureGateTests(unittest.TestCase):
              patch.object(world_semantics, 'validate_review', return_value=[]):
             factory.stage_world(self.run)
         self.assertEqual((build.call_count, prepare.call_count, plan.call_count, review.call_count), (1, 1, 2, 2))
-        self.assertEqual(plan.call_args.kwargs['feedback'], failure)
+        feedback = plan.call_args.kwargs['feedback']
+        self.assertEqual(feedback['status'], failure['status'])
+        self.assertEqual(feedback['repair_targets'], failure['repair_targets'])
+        self.assertEqual(feedback['source_review_hash'], factory._canonical_hash(failure))
         self.assertEqual(self.run.read('02_world.json')['entities']['Project']['status'][0]['value'], 'pending')
 
     def test_resume_cannot_disable_required_review(self):

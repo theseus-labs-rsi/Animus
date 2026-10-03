@@ -90,6 +90,39 @@ class JsonRetryTests(unittest.TestCase):
         self.assertEqual(records[0]["attempt_id"], records[3]["attempt_id"])
         self.assertEqual(records[5]["attempt_id"], records[8]["attempt_id"])
 
+    def test_container_completion_keeps_exact_values_and_records_original(self):
+        raw = '{"reasons":["brace } and escaped \\\" quote"],"verdict":"fail"'
+        result, error, requests, records = self.exercise([raw], complete_containers=True)
+        self.assertIsNone(error)
+        self.assertEqual(result, json.loads(raw + '}'))
+        self.assertEqual(len(requests), 1)
+        event = next(r for r in records if r['event'] == 'json_result')
+        self.assertEqual(event['parse_mode'], 'container_completion')
+        self.assertEqual(event['raw_output'], raw)
+        self.assertEqual(event['appended_suffix'], '}')
+
+    def test_container_completion_never_supplies_missing_values_or_strings(self):
+        for raw in ('{"x":', '{"x":"unfinished', '{"x":tru', '[1,', '{"x" 1', '{"x":1]'):
+            with self.subTest(raw=raw), self.assertRaises(json.JSONDecodeError):
+                config.parse_complete_json(raw, complete_containers=True)
+        with self.assertRaises(json.JSONDecodeError):
+            config.parse_complete_json('{"x":1')
+
+    @unittest.skipUnless((Path(__file__).resolve().parent / "fixtures" / 'council_world_container_failures.json.gz').is_file(), "Local historical experiment fixture is not distributed")
+    def test_five_actual_blueprint_replies_recover_without_new_requests(self):
+        import gzip
+        path = ROOT / 'tests/fixtures/council_world_container_failures.json.gz'
+        raws = json.loads(gzip.decompress(path.read_bytes()))
+        self.assertEqual(len(raws), 5)
+        for raw in raws:
+            parsed, suffix = config.parse_complete_json(raw, complete_containers=True)
+            self.assertEqual(suffix, '}')
+            self.assertEqual(parsed, json.loads(raw + '}'))
+            result, error, requests, records = self.exercise([raw], complete_containers=True)
+            self.assertIsNone(error)
+            self.assertEqual(result, parsed)
+            self.assertEqual(len(requests), 1)
+
     def test_three_attempts_exhausted_with_complete_trace(self):
         bad = ['{"attempt":1,}', '{"attempt":2,}', '{"attempt":3,}']
         result, error, requests, records = self.exercise(bad)
@@ -171,6 +204,26 @@ class JsonRetryTests(unittest.TestCase):
                 self.assertEqual(result, {"x": 1})
                 self.assertEqual(len(requests), 2)
 
+    def test_generic_provider_400_retries_only_ambiguous_form(self):
+        request = config.httpx.Request("POST", "https://offline.invalid")
+        def provider_error(*, code="InvalidParameter", param="", message=None):
+            return config._openai.APIStatusError("offline status error",
+                response=config.httpx.Response(400, request=request),
+                body={"error": {"code": code, "param": param, "message": message or
+                    "A parameter specified in the request is not valid Request id: offline"}})
+
+        ambiguous = provider_error()
+        self.assertTrue(config.is_retryable_chat_error(ambiguous))
+        result, error, requests, records = self.exercise([ambiguous, '{"x":1}'])
+        self.assertIsNone(error)
+        self.assertEqual(result, {"x": 1})
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0]["messages"], requests[1]["messages"])
+        self.assertEqual([r["retryable"] for r in records if r["event"] == "json_error"], [True])
+        for failure in (provider_error(param="max_tokens"), provider_error(code="BadParameter"),
+                        provider_error(message="A parameter specified in the request is not valid")):
+            self.assertFalse(config.is_retryable_chat_error(failure))
+
     def test_transient_exhaustion_is_bounded_and_preserves_cause(self):
         for failure in (ConnectionError("connection reset"), status_error(503)):
             with self.subTest(failure=repr(failure)):
@@ -210,6 +263,25 @@ class JsonRetryTests(unittest.TestCase):
                 self.assertEqual(len(requests), 1)
                 self.assertFalse(config.is_retryable_chat_error(failure))
                 self.assertIs(error.__cause__, failure)
+
+    def test_explicit_clean_header_deadline_retries_without_parse_feedback(self):
+        failure = config.CallDeadlineError("headers stalled", phase="awaiting_http_headers", deadline_s=600)
+        result, error, requests, records = self.exercise(
+            [failure, '{"ok":true}'], retry_clean_header_deadline=True)
+        self.assertIsNone(error)
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0]["messages"], requests[1]["messages"])
+        self.assertEqual([row["retry_action"] for row in records if row["event"] == "json_error"],
+                         ["resend_after_clean_header_deadline"])
+        self.assertFalse(any(row["event"] == "json_retry_feedback" for row in records))
+
+    def test_explicit_header_policy_does_not_retry_partial_response_deadline(self):
+        failure = config.CallDeadlineError("body stalled", phase="reading_http_body", deadline_s=600)
+        _, error, requests, _ = self.exercise(
+            [failure, '{"ok":true}'], retry_clean_header_deadline=True)
+        self.assertIs(error.__cause__, failure)
+        self.assertEqual(len(requests), 1)
 
     def test_refusal_and_filter_never_retry(self):
         replies = [completion("", refusal="refused"), completion('{"x":1}', refusal="refused"),

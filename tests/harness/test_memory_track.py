@@ -362,7 +362,7 @@ class MemoryRunnerTests(unittest.TestCase):
         with unittest.mock.patch.dict("os.environ", {}, clear=True):
             memory_runner._prepare_external_runtime("mem0")
             import os
-            self.assertTrue(os.environ["MEM0_DIR"].endswith("output/eval/_mem0_state"))
+            self.assertEqual(Path(os.environ["MEM0_DIR"]).parts[-3:], ("output", "eval", "_mem0_state"))
             self.assertEqual(os.environ["MEM0_TELEMETRY"], "False")
 
 
@@ -387,7 +387,7 @@ class MemoryTrackAdapterTests(unittest.TestCase):
         command = adapter.build_command(None, system, run_plan)
         self.assertEqual(command[:3], [__import__("sys").executable, "-m", "agent_harnesses.runners.memory"])
         self.assertIn("--plan", command)
-        self.assertEqual(command[command.index("--plan") + 1], "/tmp/run-dir/run_plan.json")
+        self.assertEqual(Path(command[command.index("--plan") + 1]), Path(run_plan.output_dir) / "run_plan.json")
         self.assertEqual(command[command.index("--limit") + 1], "6")
 
     def test_unknown_memory_system_is_rejected(self):

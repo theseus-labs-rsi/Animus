@@ -1,2 +1,5 @@
+# Preserve versioned bytes used by source and resume receipts.
+* -text whitespace=cr-at-eol
+
 # Keep the public synthetic source fixtures consistent with their SHA256 values.
 skills/realfiles-to-seedjson/examples/source_workspace/*.txt text eol=lf

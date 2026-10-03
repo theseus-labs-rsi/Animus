@@ -15,12 +15,41 @@ from copy import deepcopy
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 import re
+import json
 
 # ── op 常量(Memora state-diff 三 op = MEME 三类)──
 SET, UPDATE, DELETE, EXPIRE = "SET", "UPDATE", "DELETE", "EXPIRE"
 INVALID = "__INVALIDATED__"             # 哨兵:字段已被 DELETE/EXPIRE(该忘了)
 INSUFFICIENT = "INSUFFICIENT_EVIDENCE"  # 哨兵:字段从未出现(ABS)
 SENSITIVE_WITHHELD = "SENSITIVE_WITHHELD"  # ★L10 哨兵:该敏感值【绝不可被吐出】(写入期非泄露线;gold=常量,纯代码)
+
+
+def causal_edge_matches(parent, child, rule):
+    """The original declared-edge predicate shared by assembly and its receipt."""
+    return bool(parent and parent.get("id") != child.get("id")
+        and parent.get("type") == rule.get("trigger_event")
+        and child.get("type") == rule.get("effect_event")
+        and child.get("session") - parent.get("session")
+        == _as_int(rule.get("delay_sessions"), 0))
+
+
+def causal_execution_contract(blueprint, events=None):
+    """Describe the actual causal gate; task-specific duties remain in the seed."""
+    rules = [deepcopy(r) for r in blueprint.get("causal_rules", []) if isinstance(r, dict)]
+    result = {"version": "declared-event-causality/v1", "rules": rules,
+        "declared_edge_checks": ["different_event_ids", "declared_trigger_and_effect_types", "exact_delay_sessions"],
+        "complete_world_minimum_witnesses_per_rule": 1,
+        "automatic_effect_event_generation": False,
+        "every_trigger_instance_requires_effect": False,
+        "business_obligations_source": "original seed/task, reviewed independently",
+        "explanation": "原编译器核验显式 caused_by 事件边，并在完整世界要求每条规则至少一对合法事件见证。业务额外要求继续按原 seed/task 逐项审查。"}
+    if events is not None:
+        by_id = {e.get("id"): e for e in events}
+        result["candidate_witnesses"] = {r["id"]: [
+            {"parent": e["caused_by"], "effect": e["id"], "delay_sessions": e["session"] - by_id[e["caused_by"]]["session"]}
+            for e in events if causal_edge_matches(by_id.get(e.get("caused_by")), e, r)] for r in rules}
+        result["candidate_scope"] = "proposed slots; original world assembly and semantic review still validate actual facts"
+    return result
 
 
 def _to_num(s: Any) -> Optional[float]:
@@ -126,6 +155,7 @@ class WorldState:
     narrative: dict = field(default_factory=dict)                # 可选 Story Ledger；只引用 events，不复制动态真值
     generation_diagnostics: list[dict] = field(default_factory=list)  # 非阻塞供给/轨迹提示，不代表世界错误或题目难度
     disclosure: dict = field(default_factory=dict)  # Optional public observations; canonical truth times stay unchanged.
+    supply_construction: dict = field(default_factory=dict)
 
     def timeline(self, entity: str, fld: str) -> Optional[Timeline]:
         return self.entities.get(entity, {}).get(fld)
@@ -170,6 +200,7 @@ class WorldState:
             "world_blueprint": self.world_blueprint,
             "narrative": self.narrative,
             **({"disclosure": deepcopy(self.disclosure)} if self.disclosure else {}),
+            **({"supply_construction": deepcopy(self.supply_construction)} if self.supply_construction else {}),
             # ★imprint 已注趋势标记必须随世界落盘(刀1审计·高危):否则闭环 ②环 augment 从盘重载后
             #   done 集为空 → 旧实体被【复注且 shuffle 翻向】,而 delta 续渲不重渲旧 docs → 语料与 canonical 矛盾。
             "_trended_fields": [list(t) for t in getattr(self, "_trended_fields", [])],
@@ -196,6 +227,7 @@ class WorldState:
                  world_blueprint=d.get("world_blueprint", {}),
                  narrative=d.get("narrative", {}),
                  disclosure=deepcopy(d.get("disclosure", {})),
+                 supply_construction=deepcopy(d.get("supply_construction", {})),
                  generation_diagnostics=deepcopy(d.get("generation_diagnostics", [])))
         ws._trended_fields = [tuple(t) for t in d.get("_trended_fields", [])]
         return ws
@@ -760,6 +792,76 @@ def _traj_to_ops(traj: list[dict], date_of) -> list[Op]:
     return ops
 
 
+def intrinsic_value_ops(spec: dict, date_of) -> list[Op]:
+    """Lower intrinsic values into the original truth-time operations.
+
+    Ownership, shape, range and session checks remain in assemble_world. This
+    projection does not infer truth dates from prose or publication metadata.
+    """
+    if spec.get("type") == "stable" or ("value" in spec and "trajectory" not in spec):
+        return [Op(0, date_of(0), SET, str(spec.get("value")), None)]
+    return _traj_to_ops(spec.get("trajectory", []), date_of)
+
+
+def intrinsic_fact_time_contract(date_of) -> dict:
+    """Expose the compiler's time meaning to its intrinsic-value authors."""
+    initial = intrinsic_value_ops({"type": "stable", "value": ""}, date_of)[0]
+    return {"version": "intrinsic-fact-time/v1", "scope": "intrinsic_fields",
+        "stable": {"op": initial.op, "session": initial.session, "date": initial.date,
+            "meaning": "value 是窗口开始就成立并持续有效的事实，不是窗口结束后的总结。后期才获得的知识或发生的状态不能因为后来不再变化就写成 stable。"},
+        "evolving": {"session_meaning": "每个轨迹点的 session 是该值开始成立的真值时点，日期按同一 calendar 映射，不是公开、补录或写作时点。",
+            "first_value": SET, "changed_value": UPDATE, "empty_value": EXPIRE,
+            "before_first_value": INSUFFICIENT, "after_expiry": INVALID,
+            "between_points": "沿用前一个有效值；重复同值不产生新事实版本。后期首次成立可从对应 session 开始，不向窗口开始倒填。"},
+        "publication": "公开安排与 acquisition_context 描述怎样、何时取得或公开已有事实，不能改变字段的真值时间线。",
+        "semantic_responsibility": "作者依据原业务与所读事实选择真值时点；原语义审阅判断内容在该时点是否成立，程序不凭正文日期关键词替代该判断。"}
+
+
+def field_value_issue(decl: dict, value: Any) -> str | None:
+    """One value contract shared by author transactions and world compilation."""
+    if value is None or str(value).strip() == "":
+        return "值为空"
+    states = decl.get("states")
+    if isinstance(states, list) and states and _norm(value) not in {_norm(x) for x in states}:
+        return f"值 {value!r} 不在状态表 {states}"
+    mag = _magnitude(value)
+    if decl.get("kind") == "numeric" and mag is None:
+        return f"numeric 字段值不可解析为数值:{value!r}"
+    rng = decl.get("range")
+    if isinstance(rng, (list, tuple)) and len(rng) == 2:
+        try:
+            lo, hi = float(rng[0]), float(rng[1])
+        except (TypeError, ValueError):
+            return f"range 端点不可解析:{rng!r}"
+        if mag is None or not lo <= mag <= hi:
+            return f"值 {value!r} 越界，须在 [{lo:g},{hi:g}]"
+    return None
+
+
+def structural_projection_findings(table, world, compiler_issues):
+    """Describe authored structure that the original compiler did not retain.
+
+    Canonical membership and effects determine acceptance. Compiler messages
+    remain diagnostic evidence; callers do not infer validity from their text.
+    """
+    findings = []
+    for collection in ("relations", "events"):
+        accepted = {row["id"]: row for row in getattr(world, collection)}
+        for proposed in table.get(collection, []):
+            canonical = accepted.get(proposed["id"])
+            retained = canonical is not None
+            if retained and collection == "events":
+                encode = lambda row: json.dumps(row, ensure_ascii=False, sort_keys=True)
+                retained = Counter(map(encode, proposed["effects"])) == Counter(map(encode, canonical["effects"]))
+            if retained:
+                continue
+            prefix = ("relation " if collection == "relations" else "event ") + proposed["id"]
+            evidence = {"proposed": deepcopy(proposed), "canonical": deepcopy(canonical),
+                "compiler_issues": [issue for issue in compiler_issues if issue.startswith(prefix + " ")]}
+            findings.append({"collection": collection, "id": proposed["id"], "evidence": evidence})
+    return findings
+
+
 def assemble_world(table: dict, base: str = "2025-01-06", step_days: int = 7,
                    blueprint: dict | None = None, existing: WorldState | None = None, *,
                    require_complete: bool = True,
@@ -819,23 +921,7 @@ def assemble_world(table: dict, base: str = "2025-01-06", step_days: int = 7,
     def _value_contract_issue(tid: str, fname: str, value: Any) -> str | None:
         """机械检查一个字段值是否满足 blueprint 的 kind/states/range。"""
         decl = field_specs.get(tid, {}).get(fname) or {}
-        if value is None or str(value).strip() == "":
-            return "值为空"
-        states = decl.get("states")
-        if isinstance(states, list) and states and _norm(value) not in {_norm(x) for x in states}:
-            return f"值 {value!r} 不在状态表 {states}"
-        mag = _magnitude(value)
-        if decl.get("kind") == "numeric" and mag is None:
-            return f"numeric 字段值不可解析为数值:{value!r}"
-        rng = decl.get("range")
-        if isinstance(rng, (list, tuple)) and len(rng) == 2:
-            try:
-                lo, hi = float(rng[0]), float(rng[1])
-            except (TypeError, ValueError):
-                return f"range 端点不可解析:{rng!r}"
-            if mag is None or not lo <= mag <= hi:
-                return f"值 {value!r} 越界，须在 [{lo:g},{hi:g}]"
-        return None
+        return field_value_issue(decl, value)
 
     for ent in _dicts(table.get("entities", [])):
         name = ent.get("name") or ent.get("id")
@@ -861,7 +947,7 @@ def assemble_world(table: dict, base: str = "2025-01-06", step_days: int = 7,
                 if problem:
                     issues.append(f"entity {name}.{fname} {problem}")
                     continue
-                flds[fname] = Timeline([Op(0, date_of(0), SET, str(value), None)])
+                flds[fname] = Timeline(intrinsic_value_ops(spec, date_of))
             else:
                 traj = _dicts(spec.get("trajectory", []))
                 sessions = [_as_int(p.get("session"), -1) for p in traj]
@@ -887,7 +973,7 @@ def assemble_world(table: dict, base: str = "2025-01-06", step_days: int = 7,
                             issues.append(f"entity {name}.{fname}@{p.get('session')} {problem}")
                 for p in traj:
                     max_sess = max(max_sess, _as_int(p.get("session"), 0))
-                ops = _traj_to_ops(traj, date_of)
+                ops = intrinsic_value_ops({"type": "evolving", "trajectory": traj}, date_of)
                 if ops:
                     flds[fname] = Timeline(ops)
         if flds or blueprint is not None:
@@ -1068,9 +1154,17 @@ def assemble_world(table: dict, base: str = "2025-01-06", step_days: int = 7,
             )
             expected_effects = Counter(allowed_effects)
             if actual_effects != expected_effects:
+                expected_instances = [{"role": role, "entity": participants.get(role), "field": field}
+                                      for role, field in sorted(allowed_effects)]
+                actual_instances = [{"path": f"events[{eid}].effects[{index}].entity",
+                                     "entity": effect.get("entity"), "field": effect.get("field"),
+                                     "keys": sorted(effect)} for index, effect in enumerate(raw_effects)]
                 issues.append(
                     f"event {eid} effects 必须恰好覆盖 effect_fields:"
-                    f"actual={dict(actual_effects)} expected={dict(expected_effects)}")
+                    f"actual={actual_instances} expected={expected_instances}; "
+                    f"effects_type={type(event.get('effects')).__name__}; "
+                    "effects 使用数组，每项 entity 填 expected.entity 的具体实体名，"
+                    "由 participants[expected.role] 对应；保留业务值，勿把 role 名或 role 键写成实例格式")
                 continue
             clean_effects = []
             for eff in raw_effects:
@@ -1134,14 +1228,7 @@ def assemble_world(table: dict, base: str = "2025-01-06", step_days: int = 7,
             if not parent_ref:
                 continue
             parent = event_by_id.get(parent_ref)
-            valid_edge = any(
-                parent and parent.get("id") != child.get("id")
-                and parent.get("type") == rule.get("trigger_event")
-                and child.get("type") == rule.get("effect_event")
-                and child.get("session") - parent.get("session")
-                == _as_int(rule.get("delay_sessions"), 0)
-                for rule in causal_rules
-            )
+            valid_edge = any(causal_edge_matches(parent, child, rule) for rule in causal_rules)
             if not valid_edge:
                 issues.append(f"event {child.get('id')} caused_by 未被蓝图声明:{parent_ref}")
                 child.pop("caused_by", None)
@@ -1152,10 +1239,7 @@ def assemble_world(table: dict, base: str = "2025-01-06", step_days: int = 7,
             delay = _as_int(rule.get("delay_sessions"), 0)
             for child in events:
                 parent = event_by_id.get(child.get("caused_by"))
-                if (parent and parent.get("id") != child.get("id")
-                        and parent.get("type") == rule.get("trigger_event")
-                        and child.get("type") == rule.get("effect_event")
-                        and child.get("session") - parent.get("session") == delay):
+                if causal_edge_matches(parent, child, rule):
                     witnesses.append((parent, child))
             if require_complete and not witnesses:
                 issues.append(f"causal rule {rule.get('id')} 没有 caused_by 事件见证")

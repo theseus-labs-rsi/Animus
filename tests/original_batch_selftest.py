@@ -313,9 +313,9 @@ class BatchTests(unittest.TestCase):
 class PublicPoolTests(unittest.TestCase):
     def fixture(self):
         q = {"qid": "q", "question": "第1期负责人是谁？", "capability": "IE", "gt": {"value": "乙"},
-             "evidence_sessions": [0]}
-        corpus = {"sessions": [{"session_id": 0, "docs": [{"doc_id": "early", "content": "待披露"}]},
-                  {"session_id": 2, "docs": [{"doc_id": "later", "content": "回顾：第1期负责人是乙。"},
+             "entity": "合成项目", "evidence_sessions": [0]}
+        corpus = {"sessions": [{"session_id": 0, "docs": [{"doc_id": "early", "content": "合成项目：待披露"}]},
+                  {"session_id": 2, "docs": [{"doc_id": "later", "content": "合成项目回顾：第1期负责人是乙。"},
                                               {"doc_id": "filler", "content": "无关", "is_filler": True}]}]}
         return q, corpus
 

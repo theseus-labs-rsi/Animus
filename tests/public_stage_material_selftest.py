@@ -25,7 +25,8 @@ from pipeline.corpus_contract import (CorpusReviewExecutionError, attach_receipt
     canonical_context, public_rule_coverage_issues, public_stage_rules,
     review_documents, validate_corpus)
 from pipeline.lines.L8_transition import TransitionLine
-from pipeline.render import (_render_public_stage_material, _sanitize_corpus, render_corpus)
+from pipeline.render import (MaterialRejected, _render_public_stage_material,
+                             _sanitize_corpus, render_corpus)
 from pipeline.world_state import Op, SET, UPDATE, Timeline, WorldState, _date_of
 
 
@@ -148,6 +149,18 @@ class PublicStageMaterialTests(unittest.TestCase):
         ws, corpus, tracer = world(), {"sessions": [{"session_id": 0, "date": _date_of(0), "docs": []}]}, FakeTracer(failures=[True] * 4)
         with self.assertRaises(RuntimeError):
             _render_public_stage_material({}, ws, tracer, corpus)
+        self.assertEqual(corpus["sessions"][0]["docs"], [])
+        self.assertEqual(len(tracer.calls), 8)
+
+    def test_exploratory_rule_review_exhaustion_keeps_attempts_for_downstream(self):
+        ws = world()
+        corpus = {"sessions": [{"session_id": 0, "date": _date_of(0), "docs": []}]}
+        tracer = FakeTracer(failures=[True] * 4)
+        with self.assertRaises(MaterialRejected) as caught:
+            _render_public_stage_material({}, ws, tracer, corpus,
+                                          allow_exploratory_review=True)
+        self.assertEqual(len(caught.exception.report["drafts"]), 4)
+        self.assertEqual(caught.exception.report["task"]["kind"], "public_stage_rules")
         self.assertEqual(corpus["sessions"][0]["docs"], [])
         self.assertEqual(len(tracer.calls), 8)
 

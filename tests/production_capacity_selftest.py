@@ -117,9 +117,9 @@ class Tests(unittest.TestCase):
         def loop(*args, **kwargs):
             calls[0] += 1
             return {"action": "index", "offset": 0}
-        with self.assertRaisesRegex(ValueError, "delivered automatically"):
+        with self.assertRaisesRegex(ValueError, "no cumulative progress"):
             paged_read.call("semantic_review.blind_read", messages, chat_json=loop)
-        self.assertEqual(calls[0], 4)
+        self.assertGreater(calls[0], 4)
 
     def test_process_author_repeated_directory_actions_are_bounded(self):
         wp, ws, _ = process_fixture()
@@ -222,15 +222,35 @@ class Tests(unittest.TestCase):
             {"session_id": 2, "docs": [{"doc_id": "retrospective", "content": "回顾测试报告的客户记录。"}]},
         ]}
         candidate = grounding_review.candidates_with_evidence([q], corpus)[0]
-        self.assertEqual(candidate["semantic_scope_doc_ids"],
-                         ["early", "same_session_filler", "retrospective"])
+        self.assertEqual(candidate["semantic_scope_doc_ids"], ["early", "retrospective"])
         self.assertEqual(candidate["candidate_evidence_doc_ids"], ["early", "retrospective"])
+        receipt = candidate["semantic_scope_receipt"]
+        self.assertEqual(receipt["full_public_document_count"], 4)
+        self.assertEqual(receipt["matched_document_count"], 2)
         prepared = prepare_review([candidate], corpus, protocol,
                                   reviewer_model="test", reader_model="test")
         scope = prepared["items"][0]["document_scope"]
         self.assertEqual(scope["source_doc_ids"], candidate["semantic_scope_doc_ids"])
-        self.assertEqual(scope["document_count"], 3)
+        self.assertEqual(scope["document_count"], 2)
         self.assertEqual(len(prepared["documents"]), 4)
+        self.assertEqual(scope["selection_receipt"], receipt)
+
+    def test_paged_reader_ignores_directory_actions_while_unread_material_remains(self):
+        documents = [{"doc_id": "d1", "content": "x" * 130000},
+                     {"doc_id": "d2", "content": "末尾反证"}]
+        messages = [{"role": "system", "content": "review"},
+                    {"role": "user", "content": json.dumps({
+                        "documents": documents, "question": "task"}, ensure_ascii=False)}]
+        calls = [0]
+        def reader(step, request, **params):
+            calls[0] += 1
+            body = json.loads(request[-1]["content"])
+            if body["unread_ids"]:
+                return {"action": "index", "offset": 0}
+            return {"action": "finish", "opinion": {"verdict": "unresolved", "reason": "counterevidence"}}
+        output = paged_read.call("semantic_review.blind_read", messages, chat_json=reader, model="fake")
+        self.assertEqual(output["verdict"], "unresolved")
+        self.assertGreater(calls[0], 1)
 
     def test_long_corpus_paging_replays_all_three_original_roles_and_cache(self):
         from semantic_review_fixture_helpers import audit_output, attach_targets

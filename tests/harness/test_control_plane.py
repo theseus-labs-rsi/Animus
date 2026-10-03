@@ -27,7 +27,8 @@ from agent_harnesses.runners.diagnostic import run as run_diagnostic
 from standard_light_fixture import build_standard_light
 
 
-# 离线测试夹具，见 fixtures/README.md。
+# 测试夹具：office 历史候选快照(filtered, UNMET)。benchmark 数据不随仓库整体分发，
+# 只有这一个场景作为真实产物形状的夹具留在 tests/ 下（见 fixtures/README.md）。
 OFFICE_FILTERED = Path(__file__).resolve().parent / "fixtures" / "office__20260902-121616"
 DIAGNOSTIC_TEMPLATE = (
     CONFIG_ROOT / "experiments" / "templates" / "diagnostic-smoke.toml"
@@ -268,7 +269,8 @@ class PlanTests(unittest.TestCase):
         registry = load_registry()
         base = DIAGNOSTIC_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as tmp:
-            base = base.replace('output_root = "output"', f'output_root = "{Path(tmp) / "output"}"')
+            base = base.replace('output_root = "output/eval"',
+                                f'output_root = "{(Path(tmp) / "output").as_posix()}"')
             base = base.replace("limit = 2", "limit = 1")
             config_path = Path(tmp) / "experiment.toml"
             config_path.write_text(base, encoding="utf-8")

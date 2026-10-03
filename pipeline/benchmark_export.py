@@ -17,12 +17,8 @@ def public_view(run) -> tuple[list[dict], str]:
     it does not append the separate legacy evaluator's additional instructions.
     """
     corpus = run.read("05_corpus.json")
-    sessions = corpus.get("corpus", corpus)["sessions"]
-    material = [{"doc_id": f"d{index:06d}", "content": doc["content"],
-                 "date": session["date"], "session": session["session_id"]}
-                for index, (session, doc) in enumerate(
-                    ((session, doc) for session in sorted(sessions, key=lambda s: int(s["session_id"]))
-                     for doc in session["docs"]), 1)]
+    from pipeline.semantic_review import visible_documents
+    material, _ = visible_documents(corpus)
     about = run.read("00_about.json")
     if "public_protocol" in about:
         return material, load_public_protocol(run.dir / "00_about.json")

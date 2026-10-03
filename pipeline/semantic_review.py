@@ -259,6 +259,9 @@ def _candidates(questions) -> list[dict]:
                 or not semantic_scope or not all(isinstance(x, str) and x for x in semantic_scope)
                 or len(set(semantic_scope)) != len(semantic_scope)):
             raise ValueError("semantic_scope_doc_ids must be a nonempty unique string list")
+        scope_receipt = raw.get("semantic_scope_receipt")
+        if scope_receipt is not None and not isinstance(scope_receipt, dict):
+            raise ValueError("semantic_scope_receipt must be an object")
         candidate_id = raw.get("_semantic_candidate_id", f"q{index + 1:06d}")
         if (not isinstance(candidate_id, str) or not candidate_id.startswith("q")
                 or not candidate_id[1:].isdigit()):
@@ -270,6 +273,7 @@ def _candidates(questions) -> list[dict]:
                            "reference_provided": reference_key is not None,
                            "reference_proposal": _json_copy(reference),
                            "semantic_scope_source_doc_ids": _json_copy(semantic_scope),
+                           "semantic_scope_receipt": _json_copy(scope_receipt),
                            "reference_encoding": _reference_encoding(raw, reference, reference_key)})
     return candidates
 
@@ -374,6 +378,7 @@ def prepare_review(questions, corpus, public_protocol, *, reviewer_model: str,
     scope_hashes = {}
     for candidate in candidates:
         requested = candidate.pop("semantic_scope_source_doc_ids")
+        selection_receipt = candidate.pop("semantic_scope_receipt")
         if requested is None:
             visible_ids = [doc["doc_id"] for doc in documents]
             requested = [str(row.get("source_doc_id")) for row in source_map]
@@ -391,7 +396,8 @@ def prepare_review(questions, corpus, public_protocol, *, reviewer_model: str,
                           "visible_doc_ids": visible_ids,
                           "document_count": len(scoped_documents),
                           "corpus_hash": scope_hashes[scope_key],
-                          "full_corpus_hash": full_corpus_hash}
+                          "full_corpus_hash": full_corpus_hash,
+                          "selection_receipt": selection_receipt}
         candidate_binding = {**binding, **candidate["source_identity"],
                              "corpus_hash": document_scope["corpus_hash"],
                              "document_scope_hash": fingerprint(document_scope),
@@ -935,7 +941,8 @@ def review_questions(questions, corpus, public_protocol, *, chat_json: Callable,
                                       "corpus_hash": item["document_scope"]["corpus_hash"],
                                        "visible_view": report["input_manifest"]["visible_view"],
                                        "scope_version": item["document_scope"]["version"],
-                                       "full_corpus_hash": report["input_manifest"]["corpus_hash"]}}
+                                       "full_corpus_hash": report["input_manifest"]["corpus_hash"],
+                                       "selection_receipt": item["document_scope"].get("selection_receipt")}}
             if stage == "adjudicate":
                 blind_location = item["stage_evidence_location"].get("blind_read", {
                     "status": "not_checked", "entries": []})

@@ -90,6 +90,18 @@ class AgentFactoryTests(unittest.TestCase):
         self.assertEqual(generate.call_args.kwargs["feedback"]["issues"], feedback["issues"])
         self.assertNotIn("messages", generate.call_args.kwargs["feedback"])
 
+    def test_agent_repair_cannot_substitute_a_different_review_target(self):
+        draft = {}
+        with self.generator():
+            world_gen.build_world(self.wp, object(), log=lambda *_: None, draft_out=draft)
+        feedback = {"status":"failed", "repair_targets":{"intrinsic":[], "structure":True}}
+        with self.generator() as generate:
+            with self.assertRaisesRegex(WorldBlueprintError, "targets differ"):
+                world_gen.build_world(self.wp, object(), log=lambda *_:None,
+                    repair_input={"draft":draft, "feedback":feedback,
+                                  "targets":{"intrinsic":[], "structure":False}})
+            generate.assert_not_called()
+
     def test_tampered_repair_draft_rejected_before_author(self):
         draft = {}
         with self.generator():
@@ -109,7 +121,7 @@ class AgentFactoryTests(unittest.TestCase):
             factory.stage_whitepaper(run)
         self.assertEqual(run.read("01_whitepaper.json")["world_generation"],
                          {"strategy": "agentic", "version": 2, "blueprint_repair_attempts": 1,
-                          "disclosure_strategy": "direct_batches_v1"})
+                          "disclosure_strategy": "direct_batches_v1", "value_repair_attempts": 6})
 
     def test_factory_uses_checkpoint_and_preserves_existing_final_gates(self):
         wp = deepcopy(self.wp)

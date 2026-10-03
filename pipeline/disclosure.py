@@ -229,6 +229,8 @@ def _payload(wp, ws, task_input, feedback, format_repair=None):
     paper = {k: deepcopy(wp[k]) for k in ("domain_profile", "world_blueprint", "shared_world_spec") if k in wp}
     from pipeline.seed_world import seed_business_context
     paper["seed_requirements"] = seed_business_context(wp)
+    if wp.get("business_instance_plan"):
+        paper["business_instance_plan"] = deepcopy(wp["business_instance_plan"])
     payload = {"task": projected_task, "whitepaper": paper, "catalogue": inventory,
             "fixed_records": fixed, "fixed_refs_already_public": sorted(fixed_refs),
             "refs_requiring_arrangement": [row["ref"] for row in inventory if row["ref"] not in fixed_refs],

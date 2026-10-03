@@ -21,7 +21,7 @@ from pipeline.world_state import WorldState, INVALID, INSUFFICIENT, _to_num, _no
 
 AUTHORITATIVE_SRC = "官方通报"
 RUMOR_SRCS = ["内部群聊转述", "未经核实的外部传闻", "走廊里的口耳相传"]
-TEXT_KINDS = ("person", "status", "category")           # 可注入矛盾的文本类字段 kind
+TEXT_KINDS = ("person", "status", "category", "text", "string")  # 声明为文本的字段优先使用其类型
 
 # ── 边 A 良定义闸的真相源(单一来源,派生自上方来源常量;见 L5_well_posed.md §3)──
 # 可靠度档:数值越大越可信。当前两档;将来加"准官方/已核实"等档只改此表,闸自动生效。
@@ -74,6 +74,28 @@ def inject_conflicts(ws: WorldState, profile: dict, max_n: int = 3, seed: int = 
                 pool.setdefault(fname, set()).update(str(v) for (_s, _d, v) in tl.set_values() if v)
     rng.shuffle(cands)
 
+    planned = [r for r in profile.get("supply_construction", {}).get("rows", []) if r["line"] == "L5_conflict"]
+    if planned:
+        available = {}
+        for ent, fname, tl in cands:
+            own = {_norm(v) for _s, _d, v in tl.set_values() if v}
+            if any(_norm(v) not in own and _norm(v) != _norm(ent) for v in pool.get(fname, ())):
+                available[(ent, fname)] = (ent, fname, tl)
+        choices = {r["id"]: [key for key in available if key[0] in r["carrier"]["entities"] and key[1] == r["carrier"].get("field")] for r in planned}
+        assignments = {}
+        def assign(demand, seen):
+            for key in choices[demand]:
+                if key in seen:
+                    continue
+                seen.add(key)
+                if key not in assignments or assign(assignments[key], seen):
+                    assignments[key] = demand
+                    return True
+            return False
+        for requirement in sorted(planned, key=lambda r: len(choices[r["id"]])):
+            assign(requirement["id"], set())
+        cands = [available[key] for key in assignments]
+
     conflicts: list[dict] = []
     for ent, fname, tl in cands:
         if len(conflicts) >= max_n:
@@ -102,6 +124,22 @@ def inject_conflicts(ws: WorldState, profile: dict, max_n: int = 3, seed: int = 
 # L5 产线
 # ════════════════════════════════════════════════════════════════════════════
 class ConflictLine(ProductionLine):
+    def construction_spec(self):
+        return {"conflict": {"rule": "source_reliability", "text_field_required": True,
+                "rumor_from_other_entity": True, "exclude_all_canonical_values_of_focus": True,
+                "canonical_unchanged": True}}
+
+    def construction_issues(self, carrier, blueprint, objects, events, observations):
+        types = {t["id"]: t for t in blueprint["entity_types"]}
+        kinds = [f.get("kind") for e in carrier["entities"] for f in types[objects[e]["type"]]["fields"] if f["name"] == carrier.get("field")]
+        return [] if kinds and all(k in ("text", "string", "person", "status", "category") for k in kinds) else [
+            {"code": "conflict_field", "message": "Select a declared text, person, status or category field for source_reliability", "field": carrier.get("field")}]
+
+    def value_issues(self, world, carrier):
+        profile = {"field_schema": [f for t in world.world_blueprint.get("entity_types", []) for f in t["fields"]],
+                   "supply_construction": {"rows": [{"id": "value_check", "line": self.id, "carrier": carrier}]}}
+        available = inject_conflicts(world, profile, max_n=len(carrier["entities"]))
+        return [] if available else [{"code": "conflict_value_pool", "message": "Give another entity a distinct business-grounded value of the same field; keep canonical history consistent", "field": carrier.get("field")}]
     id = "L5_conflict"
     title = "冲突可信"
     memory = "跨来源矛盾检测 + 按来源可靠度裁决"
@@ -121,7 +159,7 @@ class ConflictLine(ProductionLine):
     def prepare(self, ws, profile: dict):
         """世界基质:注入跨来源矛盾到 ws.conflicts(canonical 不动)。幂等(--force 重跑不叠加)。
         ★注入条数 max_n 由 profile["l5_max_conflicts"] 决定(闭环 invert_rate 反推的配额;缺省 3),取代写死。"""
-        if getattr(ws, "conflicts", None):
+        if getattr(ws, "conflicts", None) and not profile.get("supply_construction", {}).get("rows"):
             return None
         ws.conflicts = inject_conflicts(ws, profile, max_n=int(profile.get("l5_max_conflicts", 3)))
         if ws.conflicts:

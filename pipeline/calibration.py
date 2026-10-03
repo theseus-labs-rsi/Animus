@@ -129,6 +129,33 @@ def preflight_release(settings: dict, log=print) -> dict:
     return preflight_native_runtime(settings, log=log)
 
 
+def production_calibration_support(settings: dict, control: dict) -> dict:
+    """Validate the shared judge-cap interface before production pays for inputs."""
+    if not isinstance(control, dict) or control.get("version") not in ("supply-driven/v3", "supply-driven/v4", "supply-driven/v5", "supply-driven/v6"):
+        raise ValueError("production_calibration_invalid_control: expected supply-driven/v3 through v6")
+    if settings.get("backend") != "native_four":
+        raise ValueError("production_calibration_unsupported_backend: the legacy memory_systems "
+                         "subprocess has no shared cross-round judge ledger; use native_four")
+    limit = settings.get("max_judge_calls")
+    if type(limit) is not int or limit < 1:
+        raise ValueError("production_calibration_invalid_judge_cap: max_judge_calls must be positive")
+    imported = "result_dirs" in settings
+    if not imported:
+        targets = settings.get("targets")
+        if (not isinstance(targets, list) or len(targets) != 4
+                or any(not isinstance(t, dict) or t.get("system") not in
+                       {"native.codex", "native.dsh"} for t in targets)):
+            raise ValueError("production_calibration_unsupported_athletes: require four "
+                             "native.codex/native.dsh targets")
+    return {"supported": True, "backend": "native_four", "mode": "import" if imported else "execute",
+            "judge_budget_scope": "no_new_calls" if imported else "all_production_rounds",
+            "max_judge_calls": limit, "athlete_internal_calls_bounded": False,
+            "athlete_total_cost_bounded": False,
+            "diagnostic": "Imported results launch no athletes or judge" if imported else
+                "Native CLI episodes retain their timeout; athlete internal model/tool calls "
+                "and total fees require a separate global budget"}
+
+
 def _file_hash(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -159,11 +186,24 @@ def calibration_identity(run) -> str:
             for name in STANDARD_FILES:
                 file = Path(settings["source_benchmark"]) / name
                 external[name] = _file_hash(file) if file.is_file() else None
-    return _digest({"version": 1, "settings": settings,
-                    "inputs": {name: _file_hash(run.dir / name) if (run.dir / name).is_file() else None
-                               for name in INPUTS},
+    return _digest({"version": 2, "settings": settings,
+                    "inputs": _evaluation_inputs(run),
                     "implementation": {str(p.relative_to(ROOT)): _file_hash(p) for p in sources},
                     "imported_sources": external})
+
+def _evaluation_inputs(run):
+    """Identity of consumed inputs, independent of paths and audit receipts."""
+    settings = run.manifest["config"]["calibration"]
+    if settings.get("backend") != "native_four":
+        # Legacy graders can consume additional semantic-review data.
+        return {name: _file_hash(run.dir / name) if (run.dir / name).is_file() else None
+                for name in INPUTS}
+    from pipeline.benchmark_export import public_view
+    material, protocol = public_view(run)
+    return {"material": material, "protocol": protocol,
+            "questions": [{key: q.get(key) for key in
+                           ("qid", "question", "line", "capability", "gt")}
+                          for q in run.read("06_grounded_questions.json")]}
 
 
 def calibration_is_current(run) -> bool:
@@ -203,6 +243,8 @@ def _select(run, result_path: Path):
 
 def execute_calibration(run, directory: Path, settings: dict) -> Path:
     """Reuse the existing solver, semantic judge and per-answer resume caches."""
+    control = run.manifest.get("config", {}).get("production_control")
+    production = production_calibration_support(settings, control) if control is not None else None
     directory.mkdir(parents=True, exist_ok=True)
     if settings.get("backend") == "native_four":
         from pipeline.native_results import import_native_results
@@ -224,7 +266,11 @@ def execute_calibration(run, directory: Path, settings: dict) -> Path:
                                 {"stage": "before_difficulty_selection"})
                 prepared.rename(benchmark)
                 holder.rmdir()
-            results = execute_native_evaluation(benchmark, directory / "evaluation", settings)
+            if production is None:
+                results = execute_native_evaluation(benchmark, directory / "evaluation", settings)
+            else:
+                results = execute_native_evaluation(benchmark, directory / "evaluation", settings,
+                    shared_judge_budget=run.dir / "production" / "judge_budget.json")
         return import_native_results(run, benchmark, results, directory, settings)
     command = [sys.executable, "-B", "-X", "utf8", "-m", "eval.multi_system",
                "--bench", str(run.dir / "06_grounded_questions.json"),
@@ -245,6 +291,9 @@ def execute_calibration(run, directory: Path, settings: dict) -> Path:
 
 
 def stage_calibration(run):
+    control = run.manifest.get("config", {}).get("production_control")
+    if control is not None:
+        production_calibration_support(run.manifest["config"].get("calibration", {}), control)
     identity = calibration_identity(run)
     questions = run.read("06_grounded_questions.json")
     if not questions:
@@ -257,8 +306,15 @@ def stage_calibration(run):
     if settings.get("backend") == "native_four":
         # Keep the answer cache stable when only the judge implementation changes.
         # The native runner validates its own input/model/runtime fingerprints.
-        answer_identity = _digest({"targets": settings["targets"], "inputs": {
-            name: _file_hash(run.dir / name) for name in INPUTS if (run.dir / name).is_file()}})
+        wp = run.read("01_whitepaper.json") if run.has("01_whitepaper.json") else {}
+        if (wp.get("generation_contract") or {}).get("version") == "generation-first/v2":
+            answer_inputs = _evaluation_inputs(run)
+        else:
+            # Keep historical native answer directories reachable. Their runner
+            # still validates the public bundle, model and runtime before reuse.
+            answer_inputs = {name: _file_hash(run.dir / name) for name in INPUTS
+                             if (run.dir / name).is_file()}
+        answer_identity = _digest({"targets": settings["targets"], "inputs": answer_inputs})
         directory = run.dir / "calibration" / ("native-" + answer_identity[:16])
     result_path = execute_calibration(run, directory, settings)
     if calibration_identity(run) != identity:
@@ -296,6 +352,12 @@ def selection_is_current(run) -> bool:
     if _file_hash(run.dir / SELECTED_ARTIFACT) != report.get("selected_sha256"):
         return False
     if not report.get("benchmark"):
+        if (run.manifest.get("config", {}).get("production_control")
+                and report.get("status") == "complete"
+                and report.get("release_ready") is False
+                and run.read(CALIBRATION_ARTIFACT).get("status") == "complete"
+                and report.get("delivery_subset")):
+            return True
         return report.get("status") in {"empty", "partial"}
     from agent_harnesses.artifacts import inspect_benchmark
     from agent_harnesses.config import BenchmarkRef
@@ -316,11 +378,22 @@ def stage_selection(run):
                                            "removed_easy": 0, "kept_incomplete": 0}, "items": []}
     else:
         selected, report = _select(run, run.dir / calibration["results"])
+    delivery_subset = None
+    if (run.manifest.get("config", {}).get("delivery_target")
+            and calibration["status"] == "complete"
+            and run.manifest["config"]["calibration"].get("backend") == "native_four"):
+        from pipeline.supply import balanced_selection_subset
+        selected, delivery_subset = balanced_selection_subset(
+            selected, report, run.manifest["config"]["delivery_target"],
+            strict_allocation=bool(run.manifest["config"].get("production_control")))
     run.write(SELECTED_ARTIFACT, selected)
     destination = None
     complete = calibration["status"] == "complete"
     native = run.manifest["config"]["calibration"].get("backend") == "native_four"
-    if selected and (complete or not native):
+    balanced = (not run.manifest["config"].get("production_control") or
+                bool(delivery_subset and all(delivery_subset["selected_by_line"].get(line, 0) >= amount
+                     for line, amount in delivery_subset["ideal_allocation"].items())))
+    if selected and (complete or not native) and balanced:
         from pipeline.benchmark_export import export_selected
         delivery = run.dir / "delivery"
         delivery.mkdir(exist_ok=True)
@@ -337,12 +410,19 @@ def stage_selection(run):
                   benchmark=str(destination.relative_to(run.dir)) if destination else None,
                   selected_sha256=_file_hash(run.dir / SELECTED_ARTIFACT),
                   source_questions="06_grounded_questions.json", all_candidates="04_questions.json")
+    if delivery_subset is not None:
+        report["delivery_subset"] = delivery_subset
+        report["exported_question_count"] = len(selected) if destination else 0
     if native:
-        report["release_ready"] = bool(complete and selected)
+        report["release_ready"] = bool(complete and selected and balanced)
         report["rule"] = "all_four_athletes_correct"
-        report["note"] = ("All four scores complete; release subset exported" if complete and selected else
+        report["note"] = ("All four scores complete; per-line delivery shortfall requires capacity refill" if complete and selected and not balanced else
+                          "All four scores complete; release subset exported" if complete and selected else
                           "Every candidate was removed as easy" if complete else
                           "Saved selected candidates; resume missing athlete scores before final export")
     run.write(SELECTION_ARTIFACT, report)
+    if run.manifest.get("config", {}).get("delivery_target"):
+        from pipeline.supply import write_delivery_report
+        write_delivery_report(run)
     run.set_algo(selection={"status": report["status"], **report["counts"]}, benchmark=report["benchmark"])
     run.log(f"  成品筛选: 原 {report['counts']['input']} 题，剔除简单题 {report['counts']['removed_easy']}，保留 {len(selected)}")

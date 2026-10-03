@@ -56,7 +56,7 @@ class Tests(unittest.TestCase):
         for change in (lambda r: r.update(mechanism_checks=[]), lambda r: r["mechanism_checks"][0].update(status="blocked")):
             raw = opinion(self.wp); change(raw)
             with self.assertRaises(WorldBlueprintError):
-                review.assess(self.wp, Tracer([raw]))
+                review.assess(self.wp, Tracer([raw,raw,raw]))
 
     def test_negative_decision_is_preserved_and_not_retried(self):
         tracer = Tracer([opinion(self.wp, "repair")])
@@ -65,6 +65,77 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(tracer.calls), 1)
         self.assertEqual(tracer.calls[0]["params"]["response_format"], {"type": "json_object"})
         self.assertIn("states", json.dumps(result["input"]))
+
+    def test_causal_review_contract_matches_actual_optional_trigger(self):
+        from pipeline.world_state import assemble_world, causal_execution_contract
+        wp, _world, table = fixture()
+        before = deepcopy(table)
+        _actual, issues = assemble_world(table,blueprint=wp["world_blueprint"],include_shape_diagnostics=False)
+        self.assertEqual(issues,[])
+        contract = causal_execution_contract(wp["world_blueprint"],table["events"])
+        self.assertFalse(contract["every_trigger_instance_requires_effect"])
+        self.assertFalse(contract["automatic_effect_event_generation"])
+        self.assertEqual(contract["complete_world_minimum_witnesses_per_rule"],1)
+        self.assertTrue(all(contract["candidate_witnesses"].values()))
+        linked = {e.get("caused_by") for e in table["events"]}
+        self.assertTrue(any(e["type"]==wp["world_blueprint"]["causal_rules"][0]["trigger_event"] and e["id"] not in linked for e in table["events"]))
+        self.assertEqual(table,before)
+
+    def test_wrong_declared_edge_and_missing_rule_witness_still_fail(self):
+        from pipeline.world_state import assemble_world, causal_execution_contract
+        wp, _world, table = fixture()
+        child = next(e for e in table["events"] if e.get("caused_by"))
+        child["session"] += 1
+        contract = causal_execution_contract(wp["world_blueprint"],table["events"])
+        self.assertFalse(any(contract["candidate_witnesses"].values()))
+        _actual, issues = assemble_world(table,blueprint=wp["world_blueprint"],include_shape_diagnostics=False)
+        self.assertTrue(any('caused_by' in x for x in issues))
+        self.assertTrue(any('没有 caused_by' in x for x in issues))
+
+    def test_review_receives_original_rules_and_execution_policy(self):
+        original=deepcopy(self.wp)
+        trace=Tracer([opinion(self.wp,'repair')])
+        result=review.assess(self.wp,trace)
+        self.assertEqual(result['decision'],'repair')
+        self.assertEqual(trace.calls[0]['payload']['mechanical_execution']['rules'],self.wp['world_blueprint']['causal_rules'])
+        self.assertEqual(self.wp,original)
+
+    def test_review_receives_compiled_global_identity_and_local_capability_scope(self):
+        from instance_plan_selftest import setup_plan
+        from pipeline.instance_plan import compile_plan
+        wp, plan, *_ = setup_plan()
+        company = plan['units'][0]['objects'].pop(0)
+        plan['units'].insert(0, {'unit_id':'foundation', 'business_purpose':'Define the shared company', 'objects':[company]})
+        plan['units'][1]['depends_on'] = ['foundation']
+        revised = compile_plan(wp,plan)
+        before = deepcopy(revised)
+        tracer = Tracer([opinion(revised,'repair')])
+        result = review.assess(revised,tracer)
+        self.assertEqual(result['decision'],'repair')
+        self.assertEqual(len(tracer.calls),1)
+        contract = tracer.calls[0]['payload']['instance_execution']
+        objects = {o['slot']:o for o in contract['objects']}
+        self.assertEqual(len(objects),2)
+        self.assertEqual(objects['company-slot']['definition_unit'],'foundation')
+        self.assertEqual(objects['company-slot']['referencing_units'],['report-case'])
+        self.assertEqual(contract['capability_scope']['obligations'][0]['carrier']['entities'],['report-slot'])
+        self.assertEqual(len(contract['capability_scope']['obligations']),1)
+        self.assertEqual(contract['declared_object_minima'],{'company':1,'report':1})
+        self.assertEqual(contract['allocated_object_counts'],{'company':1,'report':1})
+        self.assertIn({'entity_type':'report','field':'capital'},
+                      contract['numeric_field_ownership']['intrinsic_observable'])
+        self.assertIn({'entity_type':'report','field':'profit'},
+                      contract['numeric_field_ownership']['event_owned'])
+        self.assertEqual(contract['plan_hash'],revised['business_instance_plan']['plan_hash'])
+        self.assertEqual(revised,before)
+
+    def test_execution_projection_does_not_replace_plan_validation(self):
+        from instance_plan_selftest import setup_plan
+        from pipeline.instance_plan import compile_plan, PlanConflict
+        wp, plan, *_ = setup_plan()
+        plan['units'][0]['relations'][0]['to'] = 'undefined-company'
+        with self.assertRaises(PlanConflict):
+            compile_plan(wp,plan)
 
     def test_whitepaper_repairs_semantic_conflict_before_capability_mapping(self):
         from pipeline.central_office import central_office

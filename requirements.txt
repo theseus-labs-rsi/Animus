@@ -87,7 +87,7 @@ PyPika
 pyproject_hooks
 python-dateutil
 python-discovery
-python-dotenv
+python-dotenv==1.2.2
 pytz
 PyYAML
 qdrant-client
@@ -111,7 +111,7 @@ starlette
 sympy
 tenacity
 threadpoolctl
-tiktoken
+tiktoken==0.12.0
 tokenizers
 torch
 tqdm
@@ -121,7 +121,7 @@ typing-inspection
 typing_extensions
 urllib3
 uvicorn
-uvloop
+uvloop; sys_platform != "win32"
 virtualenv
 watchfiles
 websocket-client

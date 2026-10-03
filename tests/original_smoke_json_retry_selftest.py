@@ -25,6 +25,8 @@ class ReplaySDK(fixture.FakeSDK):
                 if not self.bodies:
                     raise AssertionError("Unexpected extra provider call")
                 body = self.bodies.pop(0)
+            if callable(body):
+                body = body()
             if isinstance(body, Exception):
                 raise body
             if isinstance(body, SimpleNamespace):
@@ -39,13 +41,15 @@ class RetryTests(unittest.TestCase):
     setUp = fixture.CorpusReasoningOverrideTests.setUp
     run_tool = fixture.CorpusReasoningOverrideTests.run_tool
 
-    def exercise(self, bodies, *, args=(), followup=False):
+    def exercise(self, bodies, *, args=(), followup=False, clean_header_retry=False):
         sdk = ReplaySDK(bodies)
         answers = []
         def calls(directory, cfg):
             tracer = Tracer(SimpleNamespace(dir=directory))
-            answers.append(tracer.chat_json("world.batch", [{"role": "user", "content": "Return JSON"}],
-                                           max_tokens=4096, response_format={"type": "json_object"}))
+            answers.append(tracer.chat_json("council.joint_design_revision" if clean_header_retry else "world.batch",
+                                           [{"role": "user", "content": "Return JSON"}],
+                                           max_tokens=4096, response_format={"type": "json_object"},
+                                           retry_clean_header_deadline=clean_header_retry))
             if followup:
                 answers.append(tracer.chat_json("world.structure", [], max_tokens=4096))
         with patch.object(fixture, "FakeSDK", return_value=sdk), patch("time.sleep"):
@@ -99,6 +103,76 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(answers, [{"ok": True}])
         self.assertEqual(result.profile["admitted_calls"], 2)
         self.assertFalse(result.profile["stopped"])
+
+    def test_clean_header_deadline_retry_keeps_unknown_charge_reservation(self):
+        failure = lambda: sys.modules["config"].CallDeadlineError(
+            "headers stalled", phase="awaiting_http_headers", deadline_s=600)
+        result, answers = self.exercise([failure, '{"ok":true}'], clean_header_retry=True)
+        self.assertEqual(answers, [{"ok": True}])
+        self.assertEqual(result.profile["admitted_calls"], 2)
+        self.assertEqual(result.profile["unsettled_reservation_calls"], 2)
+        self.assertFalse(result.profile["stopped"])
+        self.assertEqual(len(result.requests), 2)
+
+    def test_clean_header_retry_still_respects_physical_call_cap(self):
+        failure = lambda: sys.modules["config"].CallDeadlineError(
+            "headers stalled", phase="awaiting_http_headers", deadline_s=600)
+        result, answers = self.exercise([failure], args=("--max-calls", "1"), clean_header_retry=True)
+        self.assertEqual(result.profile["admitted_calls"], 1)
+        self.assertEqual(len(result.requests), 1)
+        self.assertTrue(result.profile["stopped"])
+        self.assertIn("__error__", answers[0])
+
+    def test_joint_author_uses_configured_attempts_and_accounts_every_timeout(self):
+        for configured, attempts in ((None, 3), (2, 2), (5, 5)):
+            with self.subTest(configured=configured):
+                failure = lambda: sys.modules["config"].CallDeadlineError(
+                    "headers stalled", phase="awaiting_http_headers", deadline_s=600)
+                sdk = ReplaySDK([failure] * (attempts - 1) + ['{"units":[]}'])
+                audit = {"calls": []}
+                answers = []
+
+                def calls(directory, cfg):
+                    from pipeline import joint_design
+                    with patch.object(joint_design, "config", cfg):
+                        answers.append(joint_design._call(
+                            Tracer(SimpleNamespace(dir=directory)),
+                            "council.instance_plan_replacement", "Return JSON", {},
+                            audit, lambda _audit: None))
+
+                args = [] if configured is None else ["--json-attempts", str(configured)]
+                with patch.object(fixture, "FakeSDK", return_value=sdk), patch("time.sleep"):
+                    result = self.run_tool(calls, args)
+                self.assertIsNone(result.error)
+                self.assertEqual(answers, [{"units": []}])
+                self.assertEqual(audit["calls"][0]["status"], "response_received")
+                self.assertEqual(result.profile["admitted_calls"], attempts)
+                self.assertEqual(result.profile["unsettled_reservation_calls"], attempts)
+                self.assertEqual(len(result.requests), attempts)
+                self.assertFalse(result.profile["stopped"])
+                self.assertEqual([r["max_attempts"] for r in result.rows
+                                  if r.get("event") == "json_attempt"], [attempts] * attempts)
+
+    def test_joint_author_exhausts_exact_configured_budget(self):
+        failure = lambda: sys.modules["config"].CallDeadlineError(
+            "headers stalled", phase="awaiting_http_headers", deadline_s=600)
+        sdk = ReplaySDK([failure] * 2)
+        audit = {"calls": []}
+
+        def calls(directory, cfg):
+            from pipeline import joint_design
+            with patch.object(joint_design, "config", cfg):
+                joint_design._call(Tracer(SimpleNamespace(dir=directory)),
+                    "council.instance_plan_replacement", "Return JSON", {},
+                    audit, lambda _audit: None)
+
+        with patch.object(fixture, "FakeSDK", return_value=sdk), patch("time.sleep"):
+            result = self.run_tool(calls, ["--json-attempts", "2"])
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.profile["admitted_calls"], 2)
+        self.assertEqual(len(result.requests), 2)
+        self.assertTrue(result.profile["stopped"])
+        self.assertEqual(audit["calls"][0]["status"], "provider_error")
 
     def test_transient_exhaustion_stops_followup(self):
         result, answers = self.exercise([ConnectionError("offline reset")] * 3, followup=True)

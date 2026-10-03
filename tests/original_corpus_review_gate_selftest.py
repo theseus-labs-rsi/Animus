@@ -52,7 +52,7 @@ class CorpusReviewGateTests(unittest.TestCase):
         self.run.write(factory.ART["whitepaper"], {"quality_contract": {"corpus_review": True}})
         self.run.write(factory.ART["world"], candidate_world())
         self.run.write(factory.ART["questions"], [])
-        self.run.write(factory.ART["corpus"], {"fixture_current": False})
+        self.run.write(factory.ART["corpus"], {"fixture_current": False, "sessions": []})
         self.run.write("00_about.json", {"public_protocol": "离线接线测试"})
 
     @staticmethod
@@ -68,10 +68,11 @@ class CorpusReviewGateTests(unittest.TestCase):
         for stage in factory.STAGES:
             def work(run, name=stage.name, artifact=stage.artifact):
                 self.calls.append(name)
-                run.write(artifact, {"fixture_current": True, "written_by": name})
+                run.write(artifact, [] if name == "questions" else
+                          {"fixture_current": True, "written_by": name, "sessions": []})
             stages.append(replace(stage, fn=work,
                                   is_current=(lambda _: True)
-                                  if stage.name in ("disclosure", "quality") else stage.is_current))
+                                  if stage.name != "corpus" else stage.is_current))
             if not self.run.has(stage.artifact):
                 self.run.write(stage.artifact, {})
             self.run.mark(stage.name, stage.artifact, 0)
@@ -82,7 +83,7 @@ class CorpusReviewGateTests(unittest.TestCase):
         self.assertIs(stage.is_current, factory._corpus_is_current)
         with patch.object(corpus_contract, "validate_corpus", side_effect=self.audit) as audit:
             self.assertFalse(stage.is_current(self.run))
-            self.run.write(factory.ART["corpus"], {"fixture_current": True})
+            self.run.write(factory.ART["corpus"], {"fixture_current": True, "sessions": []})
             self.assertTrue(stage.is_current(self.run))
         self.assertEqual(audit.call_count, 2)
         self.assertEqual(audit.call_args.args[0].to_dict(), candidate_world())
@@ -102,7 +103,7 @@ class CorpusReviewGateTests(unittest.TestCase):
                 self.assertFalse(self.run.has(factory.ART["grounding"]))
 
     def test_direct_valid_corpus_reaches_declared_grounding_path(self):
-        self.run.write(factory.ART["corpus"], {"fixture_current": True})
+        self.run.write(factory.ART["corpus"], {"fixture_current": True, "sessions": []})
         for semantic in (False, True):
             with self.subTest(public_semantic_review=semantic):
                 self.run.write(factory.ART["whitepaper"], {"quality_contract": {
@@ -180,13 +181,13 @@ class CorpusReviewGateTests(unittest.TestCase):
         with patch.object(corpus_contract, "validate_corpus", side_effect=self.audit):
             drive(self.run, stages, only="corpus")
             self.assertEqual(self.calls, ["corpus"])
-            self.assertTrue(self.run.is_done("questions"))
+            self.assertFalse(self.run.is_done("questions"))
             self.assertTrue(self.run.is_done("corpus"))
-            for target in ("grounding", "quality"):
+            for target in ("questions", "grounding", "quality"):
                 self.assertFalse(self.run.is_done(target))
                 self.assertEqual(self.run.manifest["stages"][target]["invalidated_by"], "corpus")
-            drive(self.run, stages, from_stage="grounding")
-        self.assertEqual(self.calls, ["corpus", "grounding", "quality"])
+            drive(self.run, stages, from_stage="questions")
+        self.assertEqual(self.calls, ["corpus", "questions", "grounding", "quality"])
         self.assertEqual((self.run.dir / factory.ART["questions"]).read_bytes(), question_bytes)
 
     def test_done_legacy_run_still_skips_without_validating_corpus(self):

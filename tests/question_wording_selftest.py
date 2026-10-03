@@ -106,6 +106,65 @@ class WordingTests(unittest.TestCase):
         self.assertEqual(item["repair_author_output"], {"question": revised})
         self.assertEqual(len(tracer.calls), 4)  # No third author attempt or silent template fallback.
 
+    def test_review_limit_retains_exploratory_wording_without_certifying_it(self):
+        wp, _, q, _, _ = fixture()
+        negative = {"verdict": "unresolved", "reason": "Time remains unclear.",
+                    "issues": ["time scope"]}
+        revised = "这份报告的服务对象是哪家客户？"
+        tracer = Tracer([{"question": "这份报告服务于谁？"}, negative,
+                         {"question": revised}, negative])
+        questions = phrase_questions([q], wp, tracer, log=lambda *a: None,
+                                     allow_exploratory_review=True)
+        self.assertEqual(questions[0]["question"], revised)
+        self.assertTrue(questions[0]["question_validation"]["review_exhausted"])
+        self.assertEqual(len(questions[0]["question_validation"]["review_history"]), 2)
+        self.assertNotEqual(validate_wording(questions[0]), [])
+        self.assertEqual(len(tracer.calls), 4)
+
+    def test_reviewer_protocol_errors_use_bounded_retry_then_keep_candidate(self):
+        wp, _, q, _, _ = fixture()
+        bad = {"verdict": "unknown", "reason": "unusable reviewer output"}
+        authored = "第一期这份测试报告服务于哪家客户？"
+        tracer = Tracer([{"question": authored}, bad, bad])
+        audit = {}
+        questions = phrase_questions([q], wp, tracer, log=lambda *a: None,
+                                     audit=audit, allow_exploratory_review=True)
+        self.assertEqual(questions[0]["question"], authored)
+        self.assertEqual([call[0] for call in tracer.calls],
+                         ["phrase", "phrase.review", "phrase.review"])
+        self.assertEqual([item["source"] for item in audit["items"][0]["attempts"]],
+                         ["author", "review_retry"])
+        self.assertTrue(questions[0]["question_validation"]["review_exhausted"])
+        self.assertEqual(questions[0]["question_validation"]["status"], "execution_error")
+        self.assertNotEqual(validate_wording(questions[0]), [])
+
+    def test_reviewer_protocol_retry_can_certify_unchanged_candidate(self):
+        wp, _, q, _, _ = fixture()
+        tracer = Tracer([{"question": "第一期报告服务于哪家客户？"},
+                         {"verdict": "unknown"}, OK])
+        questions = phrase_questions([q], wp, tracer, log=lambda *a: None,
+                                     allow_exploratory_review=True)
+        self.assertFalse(questions[0]["question_validation"]["review_exhausted"])
+        self.assertEqual(validate_wording(questions[0]), [])
+        self.assertEqual(len(tracer.calls), 3)
+
+    def test_failed_repair_retains_first_reviewed_candidate_as_exploratory(self):
+        wp, _, q, _, _ = fixture()
+        negative = {"verdict": "revise", "reason": "time omitted", "issues": ["time"]}
+        first = "这份报告服务于谁？"
+        tracer = Tracer([{"question": first}, negative, {"question": ""}])
+        audit = {}
+        questions = phrase_questions([q], wp, tracer, log=lambda *a: None,
+                                     audit=audit, allow_exploratory_review=True)
+        self.assertEqual(questions[0]["question"], first)
+        self.assertTrue(questions[0]["question_validation"]["review_exhausted"])
+        self.assertEqual(questions[0]["question_validation"]["status"], "pending")
+        self.assertEqual(audit["items"][0]["repair_author_output"], {"question": ""})
+        self.assertEqual(audit["items"][0]["repair_failure"]["type"],
+                         "QuestionAuthoringFormatError")
+        self.assertNotEqual(validate_wording(questions[0]), [])
+        self.assertEqual(len(tracer.calls), 3)
+
     def test_repair_author_failure_keeps_first_candidate_and_raw_without_second_review(self):
         wp, _, q, _, _ = fixture()
         negative = {"verdict": "revise", "reason": "time omitted", "issues": ["time"]}

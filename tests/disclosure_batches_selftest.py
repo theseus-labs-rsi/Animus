@@ -136,6 +136,52 @@ class Tests(unittest.TestCase):
             with self.assertRaises(batch.InputCapacityError):
                 batch._fit_messages(payload, raw, targets, context, None, required=context)
 
+    def test_pending_index_keeps_only_undecided_references(self):
+        payload = d._payload(self.wp, self.ws, self.task, None)
+        refs = payload["refs_requiring_arrangement"]
+        raw = {"records": [{"session": 0, "refs": refs[:1], "channel": "原文",
+                            "acquisition_context": "已由作者安排"}],
+               "undisclosed": refs[1:2], "reason": "已有决定"}
+        targets = refs[2:3]
+        legacy = json.loads(batch._messages(payload, raw, targets, [], None)[-1]["content"])
+        compact = json.loads(batch._messages(payload, raw, targets, [], None,
+                                             index_scope="pending_only")[-1]["content"])
+        self.assertEqual(compact["accepted_records"], legacy["accepted_records"])
+        self.assertEqual(compact["accepted_undisclosed"], legacy["accepted_undisclosed"])
+        self.assertNotIn(refs[0], {row["ref"] for row in compact["remaining_index"]})
+        self.assertNotIn(refs[1], {row["ref"] for row in compact["remaining_index"]})
+        self.assertIn(refs[0], {row["ref"] for row in legacy["remaining_index"]})
+
+    def test_legacy_checkpoint_migrates_without_rewriting_accepted_decisions(self):
+        for i in range(40):
+            self.ws.entities[f"entity{i}"] = {"value": Timeline([Op(0, self.ws.date_of_session(0), SET, i)])}
+        payload = d._payload(self.wp, self.ws, self.task, None)
+        refs = payload["refs_requiring_arrangement"]
+        targets = refs[:1]
+        messages = batch._messages(payload, {"records": [], "undisclosed": [],
+                                              "reason": "尚未完成安排"}, targets, [], None)
+        output = DirectFixture().chat_json(d.STEP, messages)
+        part = {"target_refs": targets, "context_refs": [], "repair": None,
+                "messages_hash": d._hash(messages), "output": output}
+        self.assertEqual(batch._replay(payload, self.ws, [part])["records"][0]["refs"], targets)
+        with patch.object(batch, "FACT_CHARS", 700), tempfile.TemporaryDirectory() as directory:
+            current = batch._binding(self.wp, self.ws, payload, "cheap-author")
+            legacy = deepcopy(current)
+            legacy["implementation"] = "earlier-source-implementation"
+            old_path = Path(directory) / ("02_disclosure_checkpoint_" + d._hash(legacy)[:20] + ".json")
+            batch._save(old_path, {"binding": legacy, "parts": [part],
+                                   "attempts": [], "status": "building"})
+            old_bytes = old_path.read_bytes()
+            tracer = DirectFixture()
+            result = d.author_plan(self.wp, self.ws, tracer, self.task, checkpoint_dir=directory)
+            self.assertEqual(result["status"], "ready", result)
+            self.assertEqual(result["migrated_checkpoint"]["accepted_groups"], 1)
+            self.assertEqual(old_path.read_bytes(), old_bytes)
+            self.assertEqual(self.ws.disclosure["parts"][0], part)
+            self.assertTrue(all(row.get("index_scope") == "pending_only"
+                                for row in self.ws.disclosure["parts"][1:]))
+            self.assertEqual(d.validate_plan(self.ws), [])
+
     def test_tighter_transport_limit_preserves_exact_completed_decisions(self):
         self.assertEqual(d.author_plan(self.wp, self.ws, DirectFixture(), self.task)["status"], "ready")
         original = deepcopy(self.ws.disclosure)
@@ -211,6 +257,61 @@ class Tests(unittest.TestCase):
         self.assertEqual(report["status"], "ready", report)
         self.assertEqual(report["repaired_record_ids"], ["d1", "d2"])
         self.assertEqual(self.ws.disclosure["raw_output"]["records"][2:], before["records"][2:])
+
+    def test_publication_repair_can_move_the_record_without_changing_truth(self):
+        def original_arrangement(body, number):
+            return {"records": [{"session": 0, "refs": body["target_refs"],
+                "channel": "离线接口测试", "acquisition_context": "原作者的公开安排。"}],
+                "undisclosed": [], "reason": "Offline arrangement fixture"}
+        self.assertEqual(d.author_plan(self.wp, self.ws, DirectFixture(original_arrangement),
+                                      self.task)["status"], "ready")
+        before = deepcopy(self.ws.disclosure)
+        truth = d._world(self.ws)
+        review = {"status": "failed", "repair_targets": {"disclosure": True},
+            "issues": [{"id": "i1", "finding": "这条安排需要延后公开，不能只改说明。",
+                        "disposition": "repair"}],
+            "disclosure_reviews": [{"record_id": "d1", "status": "repair",
+                                    "reason": "由原公开作者选择可行公开期。"}]}
+        def move_record(body, number):
+            replacement = deepcopy(body["records"][0]["record"])
+            replacement["session"] = self.ws.n_sessions - 1
+            replacement["acquisition_context"] = "原作者选择在窗口末期公开同一组原引用。"
+            return {"record_updates": [{"record_index": 0, "record": replacement}],
+                    "reason": "延后公开；离线响应不代表语义正确。"}
+        author = DirectFixture(move_record)
+        report = batch.repair(self.wp, self.ws, author, review)
+        self.assertEqual(report["status"], "ready", report)
+        self.assertEqual(len(author.calls), 1)
+        self.assertEqual(self.ws.disclosure["records"][0]["session"], self.ws.n_sessions - 1)
+        self.assertEqual(self.ws.disclosure["parts"][:-1], before["parts"])
+        self.assertEqual(self.ws.disclosure["parts"][-1]["protocol"], "publication-repair/v2")
+        self.assertEqual(d._world(self.ws), truth)
+        self.assertEqual(d.validate_plan(self.ws), [])
+        no_more_calls = DirectFixture(lambda *_: AssertionError("Attempt allowance must not grow"))
+        self.assertEqual(batch.repair(self.wp, self.ws, no_more_calls, review)["status"], "error")
+        self.assertFalse(no_more_calls.calls)
+
+    def test_publication_repair_keeps_original_compiler_and_legacy_scope(self):
+        self.assertEqual(d.author_plan(self.wp, self.ws, DirectFixture(), self.task)["status"], "ready")
+        original = deepcopy(self.ws.disclosure["raw_output"])
+        replacement = deepcopy(original["records"][0])
+        replacement["session"] = 0
+        output = {"record_updates": [{"record_index": 0, "record": replacement}],
+                  "reason": "Offline transport test"}
+        with self.assertRaisesRegex(ValueError, "preserve session"):
+            batch._merge_semantic_repair(self.ws, original, output, [0])
+        replacement["session"] = self.ws.n_sessions
+        with self.assertRaises(d.PlanFormatError):
+            batch._merge_semantic_repair(self.ws, original, output, [0], protocol="publication-repair/v2")
+        replacement["session"] = 0
+        replacement["channel"] = "changed channel"
+        with self.assertRaisesRegex(ValueError, "preserve refs and channel"):
+            batch._merge_semantic_repair(self.ws, original, output, [0], protocol="publication-repair/v2")
+        replacement["channel"] = original["records"][0]["channel"]
+        replacement["refs"] = original["records"][1]["refs"]
+        with self.assertRaisesRegex(ValueError, "preserve refs and channel"):
+            batch._merge_semantic_repair(self.ws, original, output, [0], protocol="publication-repair/v2")
+        self.assertEqual(self.ws.disclosure["raw_output"], original)
 
     def test_partial_success_is_saved_and_resume_requests_only_remaining_refs(self):
         first_ref = []

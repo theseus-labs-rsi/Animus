@@ -90,7 +90,7 @@ class MigrationTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_changed_input_or_projection_buys_no_migration(self):
-        for changed in ("wp_hash", "model", "existing_hash", "version", "world", "issues"):
+        for changed in ("wp_hash", "model", "existing_hash", "version", "world", "issues", "inventory"):
             with self.subTest(changed=changed):
                 def inspect(root, checkpoint):
                     row = self.inspect(root, checkpoint)
@@ -131,6 +131,69 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "read-only"): self.migrate()
         self.assertEqual(self.inspections, 0)
         self.assertFalse(self.output.exists())
+
+    def ordinary_parent(self):
+        from seed_world_selftest import fixture
+        from supply_pipeline_selftest import target
+        from world_agent_selftest import ScriptedTracer as OrdinaryTracer, PLAN, WRITE, FINISH, write, table_part
+        from pipeline import supply, supply_capacity
+        self.parent = self.directory / "ordinary-parent.json"
+        self.wp, _world, table = fixture()
+        self.wp["line_mapping"] = [{"line": line, "applicable": True, "instantiation": "Synthetic carrier"}
+            for line in ("L1_timeline", "L3_process", "L5_conflict", "L7_consolidation", "L8_transition")]
+        supply.attach_plan(self.wp, target(["L1_timeline", "L3_process"], 4), 10, capacity_driven=True)
+        trace = OrdinaryTracer([(PLAN, write("one")), (WRITE, table_part(table, [0, 1], True)),
+                                (PLAN, FINISH), (PLAN, FINISH)])
+        with self.assertRaises(supply_capacity.CapacityReviewRequested):
+            world_agent.generate_world(self.wp, trace, checkpoint_path=self.parent, log=lambda *_: None)
+        state = json.loads(self.parent.read_text(encoding="utf-8"))
+        self.current_binding = deepcopy(state["binding"])
+        state["binding"]["implementation"]["world_agent.py"] = "synthetic-legacy-source"
+        world_agent._save(self.parent, state)
+        self.state = json.loads(self.parent.read_text(encoding="utf-8"))
+        self.parent_bytes = self.parent.read_bytes()
+
+    def test_ordinary_supply_stop_inspects_migrates_and_restores_without_new_calls(self):
+        self.ordinary_parent()
+        current = migration.inspect(Path(__file__).resolve().parents[1], self.parent)
+        self.assertEqual(current["issues"], [])
+        self.assertEqual(current["inventory"], self.state["upstream_request"]["inventory"])
+        self.assertEqual(current["provider_calls"], 0)
+
+        def inspect(root, _checkpoint):
+            row = deepcopy(current)
+            if root == self.legacy_root:
+                row["binding"] = deepcopy(self.state["binding"])
+                row["source_hashes"] = {"synthetic": "legacy-inspection"}
+            return row
+
+        receipt = self.migrate(inspect)
+        self.assertEqual(receipt["supply_inventory"], current["inventory"])
+        self.assertEqual(receipt["provider_calls"], 0)
+        self.assertFalse(receipt["ledger_or_budget_changes"])
+        child = json.loads((self.output / self.parent.name).read_text(encoding="utf-8"))
+        trace = ScriptedTracer([])
+        _table, resumed = world_agent.generate_world(self.wp, trace, resume_state=child,
+            allow_supply_shortfall=True, log=lambda *_: None)
+        self.assertEqual(trace.calls, [])
+        self.assertEqual(resumed["status"], "completed")
+        self.assertFalse(resumed["release_eligible"])
+        self.assertGreater(resumed["supply_warning"]["shortfall"], 0)
+        for key in ("units", "log", "steps", "retired_units", "upstream_request"):
+            self.assertEqual(resumed[key], self.state[key], key)
+        self.assertEqual(self.parent.read_bytes(), self.parent_bytes)
+
+    def test_ordinary_migration_rejects_other_stop_reasons_before_inspection(self):
+        self.ordinary_parent()
+        parent = deepcopy(self.state)
+        for change in ({"status": "execution_error"}, {"upstream_request": {}},
+                       {"feedback_revision_required": True}, {"version": "unknown"}):
+            with self.subTest(change=change):
+                world_agent._save(self.parent, {**deepcopy(parent), **change})
+                with self.assertRaisesRegex(ValueError, "completed or supply-review"):
+                    self.migrate(expected=hashlib.sha256(self.parent.read_bytes()).hexdigest())
+                self.assertFalse(self.output.exists())
+                self.assertEqual(self.inspections, 0)
 
 
 if __name__ == "__main__":

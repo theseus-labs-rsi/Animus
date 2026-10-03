@@ -568,7 +568,8 @@ def filler_content_resume_evidence(profile, trace_path):
 
 def quantity_arguments(args):
     """Forward quantity controls to the existing factory/closed_loop stages."""
-    if (args.source_run and not args.reuse_world_checkpoint) or args.resume_existing:
+    if (args.source_run and (not args.reuse_world_checkpoint
+                            or (args.min_questions is None and args.question_budget is None))) or args.resume_existing:
         # A derived recovery run keeps the frozen source quantities.  Supplying
         # the wrapper's tiny smoke defaults would silently turn a large saved
         # world into a four-question experiment.
@@ -710,7 +711,9 @@ def reuse_original_stages(source, directory, through, *, reuse_world_checkpoint=
         # The joint-design receipt is part of the whitepaper's executable
         # contract, and the world stage reads it again after a checkpoint reuse.
         names |= {"01_joint_design_audit.json", "01_joint_design_receipt.json",
-                   "01_instance_plan.json", "01_supply_plan.json"}
+                    "01_supply_plan.json"}
+        if whitepaper.get("business_instance_plan"):
+            names.add("01_instance_plan.json")
         if "world" in stages:
             names.add("02_source_supply_gate.json")
             names |= {name for name in ("02_instance_fulfillment.json",
@@ -727,12 +730,18 @@ def reuse_original_stages(source, directory, through, *, reuse_world_checkpoint=
     if reuse_world_checkpoint:
         if through != "whitepaper" or not model:
             raise ValueError("World checkpoint reuse requires whitepaper reuse and an explicit model")
-        from pipeline.world_agent import _binding, _digest
+        from pipeline.world_agent import _binding, _digest, supply_shortfall_checkpoint
         wp = view.read("01_whitepaper.json")
+        from pipeline import joint_design
+        allow_shortfall = (joint_design.exploratory_after_limit(view, wp)
+                          and view.read("01_joint_design_audit.json").get("used_revisions", 0)
+                          >= joint_design.MAX_REVISIONS)
         checkpoints = [(path.name, view.read(path.name)) for path in source.glob("02_world_agent_*.json")]
-        checkpoints = [(name, state) for name, state in checkpoints if state.get("status") == "completed"]
+        checkpoints = [(name, state) for name, state in checkpoints
+                       if state.get("status") == "completed"
+                       or (allow_shortfall and supply_shortfall_checkpoint(state))]
         if not checkpoints:
-            raise ValueError("No completed world construction checkpoint to reuse")
+            raise ValueError("No completed or design-limit supply checkpoint to reuse")
         for checkpoint_name, state in checkpoints:
             expected = {**_binding(wp, None), "model": model,
                         "wp_hash": (state.get("binding") or {}).get("wp_hash")}

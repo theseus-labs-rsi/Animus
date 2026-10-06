@@ -13,15 +13,8 @@
 
 Animus is a benchmark generation pipeline. You provide a domain seed and targets for question count and corpus size. The whitepaper plans the world and supply by production line; the pipeline generates documents over time, haystack material, and evaluation questions, retaining evidence and review results. Optional stages run four-model evaluation, remove easy questions, and export a standard benchmark package.
 
-```mermaid
-flowchart LR
-    A[Domain seed and generation target] --> B[World and supply design]
-    B --> C[Business facts and question orders]
-    C --> D[Formal documents and haystack]
-    D --> E[Question generation and quality review]
-    E --> F[Optional evaluation and selection]
-    F --> G[Standard benchmark package]
-```
+> **Generation:** seed and target → world and supply design → business facts and question orders → corpus and candidate questions → grounding and quality review<br>
+> **Optional:** four-model evaluation → easy-question selection → standard benchmark package
 
 ### Model evaluation results
 

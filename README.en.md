@@ -39,7 +39,7 @@
 
 ## Evaluation results
 
-<details>
+<details open>
 <summary>Explore model results and capability coverage across four domains and 240 questions</summary>
 
 
@@ -67,7 +67,7 @@ The upper panel shows the question distribution across domains and capability ca
 
 ## Quick start
 
-<details>
+<details open>
 <summary>Expand the installation, configuration, and generation guide (Python 3.10+)</summary>
 
 
@@ -88,7 +88,7 @@ python -m venv venv
 Copy-Item .env.example .env
 ```
 
-<details>
+<details open>
 <summary>Linux / macOS installation commands</summary>
 
 ```bash
@@ -151,7 +151,7 @@ Results are saved in `output/runs/<run_id>/`:
 
 Review degradation preserves candidates and warnings and is reflected in quality eligibility and delivery reports. The `eligible` field in `07_release.json` records quality eligibility; `10_delivery_target.json` and `11_production.json` report target attainment. When selection yields deliverable questions, the standard package is under `delivery/<attempt>/benchmark/` within that run directory.
 
-<details>
+<details open>
 <summary>Optional: four-model evaluation and selection (V1 target)</summary>
 
 Four-model evaluation also requires Node.js 22.19.0+ and npm. Install the CLIs and prepare the evaluation endpoint configuration:
@@ -203,7 +203,7 @@ Native four-model scoring does not yet support `L3_process_trace`, so this examp
 
 </details>
 
-<details>
+<details open>
 <summary>Resume, measurement rules, and engineering configuration</summary>
 
 Resume a run:
@@ -224,7 +224,7 @@ Corpus tokens are counted from document bodies with the named tokenizer and pinn
 
 </details>
 
-<details>
+<details open>
 <summary>Repository layout and development checks</summary>
 
 | Path | Contents |
@@ -244,7 +244,7 @@ Dependency lists cover the [core environment](requirements-minimal.txt), [full e
 
 ## Case studies
 
-<details>
+<details open>
 <summary>Explore three cases: historical conclusions, source changes, and state transitions</summary>
 
 

@@ -39,7 +39,7 @@
 
 ## 评测结果
 
-<details>
+<details open>
 <summary>查看四领域、240 道题的模型试答与能力覆盖</summary>
 
 
@@ -67,7 +67,7 @@
 
 ## 快速开始
 
-<details>
+<details open>
 <summary>展开安装、配置与生成指南（Python 3.10+）</summary>
 
 
@@ -88,7 +88,7 @@ python -m venv venv
 Copy-Item .env.example .env
 ```
 
-<details>
+<details open>
 <summary>Linux / macOS 安装命令</summary>
 
 ```bash
@@ -151,7 +151,7 @@ seed 提供领域背景与约束；题量和语料规模写入目标文件。白
 
 审查降级会保留候选和警告，并反映在质量资格与交付报告中。`07_release.json` 的 `eligible` 记录质量资格；目标达成情况见 `10_delivery_target.json` 与 `11_production.json`。筛选得到可交付题目后，标准包位于该目录下的 `delivery/<attempt>/benchmark/`。
 
-<details>
+<details open>
 <summary>可选：四模型试答与筛选（V1 目标）</summary>
 
 四模型试答还需要 Node.js 22.19.0+ 和 npm。安装 CLI，并准备试答接口配置：
@@ -203,7 +203,7 @@ V1 默认预留筛后目标三倍的候选额度，并根据各线缺口补供�
 
 </details>
 
-<details>
+<details open>
 <summary>续跑、计量口径与工程配置</summary>
 
 续跑命令：
@@ -224,7 +224,7 @@ V2 按 `04_questions.json` 中各线候选题计数，接地后题量、质量�
 
 </details>
 
-<details>
+<details open>
 <summary>仓库目录与开发验证</summary>
 
 | 路径 | 内容 |
@@ -244,7 +244,7 @@ V2 按 `04_questions.json` 中各线候选题计数，接地后题量、质量�
 
 ## 具体案例分析
 
-<details>
+<details open>
 <summary>查看三个案例：历史结论、来源切换与状态变化</summary>
 
 

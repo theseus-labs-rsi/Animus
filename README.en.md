@@ -1,27 +1,224 @@
 # Animus
 
-<p>
+<p align="center">
   <a href="README.md"><img src="assets/readme/language/zh.svg" alt="切换到中文" width="96" height="34"></a>
   <a href="README.en.md"><img src="assets/readme/language/en-active.svg" alt="English (current language)" width="96" height="34"></a>
 </p>
 
-Animus plans evolving domain worlds from structured seeds and generation targets, produces documents, then generates evaluation questions grounded in those documents. It covers information extraction, knowledge updates, temporal reasoning, multi-hop relations, and source conflicts. The pipeline supports supply planning by production line, question review, evaluation with four models, and export to a standard benchmark package.
+<p align="center"><strong>Generate evolving domain documents and evidence-grounded evaluation questions from a domain seed.</strong></p>
 
-[Results](#results) · [Examples](#examples) · [Quick start](#quick-start)
+<p align="center"><a href="#overview">Overview</a> · <a href="#quick-start">Quick start</a> · <a href="#case-studies">Case studies</a></p>
 
-## Results
+## Overview
 
-These charts summarize an archived selected sample of 240 questions from the generation runs, covering legal, finance, forensic, and insurance domains. They show results for four model configurations, seven capability categories, and the question distribution.
+Animus is a benchmark generation pipeline. You provide a domain seed and targets for question count and corpus size. The whitepaper plans the world and supply by production line; the pipeline generates documents over time, haystack material, and evaluation questions, retaining evidence and review results. Optional stages run four-model evaluation, remove easy questions, and export a standard benchmark package.
 
-![Overall results, seven capability profiles, and results by domain](assets/readme/01_performance_dashboard.png)
+```mermaid
+flowchart LR
+    A[Domain seed and generation target] --> B[World and supply design]
+    B --> C[Business facts and question orders]
+    C --> D[Formal documents and haystack]
+    D --> E[Question generation and quality review]
+    E --> F[Optional evaluation and selection]
+    F --> G[Standard benchmark package]
+```
 
-![Question distribution and model results by capability](assets/readme/02_coverage_and_capabilities.png)
+### Model evaluation results
 
-## Examples
+These charts show an **archived selected sample of 240 questions** from generation runs across legal, finance, forensic, and insurance domains. Results come from archived four-model evaluation records and show correct counts, accuracy, and capability profiles.
 
-These three questions come from the same 240-question sample. Animus generated the questions and source documents. The timelines summarize the relevant records; model answers retain their original Chinese wording. The [source documents and answers](examples/case_studies.json) are included.
+<p align="center">
+  <a href="assets/readme/01_performance_dashboard.png"><img src="assets/readme/01_performance_dashboard.png" alt="Overall results for four model configurations, seven capability profiles, and results by domain on 240 questions" width="100%"></a>
+</p>
 
-### A reopened case and its historical conclusion
+*Figure 1 | Overall and component results for four model configurations. Click to open the original image at 2880 pixels wide. Chart labels are in Chinese.*
+
+### Question coverage and capability results
+
+The upper panel shows the question distribution across domains and capability categories. The lower panel reports each model's correct counts and accuracy by capability, so results can be read alongside sample sizes.
+
+<p align="center">
+  <a href="assets/readme/02_coverage_and_capabilities.png"><img src="assets/readme/02_coverage_and_capabilities.png" alt="Question distribution across four domains and seven capability categories, with model correct counts and accuracy by capability" width="100%"></a>
+</p>
+
+*Figure 2 | Domain and capability coverage, followed by capability-level evaluation results. The three case studies below come from this 240-question sample.*
+
+## Quick start
+
+This path uses a V2 target to generate corpus material and candidate questions, then complete quality review. It requires **Python 3.10+**. Run commands from the repository root; on Linux/macOS, use `./venv/bin/python` as the interpreter.
+
+### 1. Install and configure
+
+```bash
+git clone https://github.com/theseus-labs-rsi/Animus.git
+cd Animus
+```
+
+Windows PowerShell:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\python.exe -X utf8 -m pip install -r requirements-minimal.txt
+Copy-Item .env.example .env
+```
+
+<details>
+<summary>Linux / macOS installation commands</summary>
+
+```bash
+python3 -m venv venv
+./venv/bin/python -X utf8 -m pip install -r requirements-minimal.txt
+cp .env.example .env
+```
+
+</details>
+
+Set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `MODEL` in `.env`. `STRUCTURE_MODEL` can select a separate world design model.
+
+### 2. Prepare the seed and generation target
+
+Save your domain seed as `path/to/seed.json`. Start from the repository's [synthetic seed example](skills/realfiles-to-seedjson/examples/seed_v2_example.json), or prepare your own material using the [schema](schemas/seed_pack_v2.schema.json) and [conversion guide](skills/realfiles-to-seedjson/SEEDJSON_GUIDE.md).
+
+The seed supplies domain context and constraints; the target file specifies question count and corpus size. The whitepaper uses these inputs to design entities, relations, and business processes over time. The program then validates and executes the instance plan.
+
+Save this V2 target as `path/to/target.json`: **200 candidates** evenly allocated across seven lines, at least **100,000 formal-document tokens**, at least **one million total corpus tokens**, and a haystack-to-formal token ratio of at least **9:1**.
+
+```json
+{
+  "version": 2,
+  "count_stage": "generation_quality",
+  "candidate_questions": 200,
+  "requested_lines": [
+    "L1_timeline", "L2_relational", "L3_process", "L5_conflict",
+    "L6_refusal", "L7_consolidation", "L8_transition"
+  ],
+  "core_tokens": 100000,
+  "corpus_tokens": 1000000,
+  "filler_ratio": 9,
+  "tokenizer": "cl100k_base@0.12.0",
+  "max_supply_rounds": 3
+}
+```
+
+### 3. Start generation
+
+```powershell
+.\venv\Scripts\python.exe -X utf8 tools/validate_seed_packs.py path/to/seed.json --require-generation-ready
+.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --seed-pack path/to/seed.json --delivery-target path/to/target.json --process-questions --semantic-workers 4
+```
+
+The pipeline plans supply by line, generates the world, disclosure schedule, and question orders, then checks orders and produces formal documents and haystack material. Question wording, grounding, and quality review follow. This command stops at `quality` by default.
+
+### 4. Inspect outputs and target attainment
+
+Results are saved in `output/runs/<run_id>/`:
+
+| File | Contents |
+|---|---|
+| `manifest.json`, `11_production.json` | Stage status, frozen configuration, and supply rounds |
+| `01_whitepaper.json`, `02_world.json` | World design and executed business facts |
+| `03_orders.json`, `04_questions.json` | Question orders and formed candidates |
+| `05_corpus.json`, `05_corpus_token_scale.json` | Corpus documents and actual token counts for formal documents and haystack |
+| `06_grounded_questions.json`, `07_release.json` | Grounded questions, question review results, and quality eligibility |
+| `08_calibration.json`, `09_selection.json` | Four-model evaluation status and selection results |
+| `10_delivery_target.json` | Measured line counts and corpus size against the delivery target |
+
+Review degradation preserves candidates and warnings and is reflected in quality eligibility and delivery reports. The `eligible` field in `07_release.json` records quality eligibility; `10_delivery_target.json` and `11_production.json` report target attainment. When selection yields deliverable questions, the standard package is under `delivery/<attempt>/benchmark/` within that run directory.
+
+<details>
+<summary>Optional: four-model evaluation and selection (V1 target)</summary>
+
+Four-model evaluation also requires Node.js 22.19.0+ and npm. Install the CLIs and prepare the evaluation endpoint configuration:
+
+```bash
+npm install --global @openai/codex@0.153.2 @deepseek-ai/dsh@0.1.2-rc.1
+```
+
+```powershell
+Copy-Item configs/env/secrets.env.example configs/env/secrets.env
+```
+
+Configure the four model endpoints in `configs/env/secrets.env`. The [release_four.json configuration](examples/release_four.json) specifies models and selection rules. See also the [DSH profile](configs/dsh/README.md).
+
+Use this V1 target for at least 200 questions after four-model selection and at least one million corpus tokens, balanced across the six listed production lines. `per_line_min` and `per_line_max` can set bounds for individual lines.
+
+```json
+{
+  "version": 1,
+  "count_stage": "selection_complete",
+  "final_questions": 200,
+  "requested_lines": [
+    "L1_timeline", "L2_relational", "L5_conflict",
+    "L6_refusal", "L7_consolidation", "L8_transition"
+  ],
+  "per_line_min": {},
+  "per_line_max": {},
+  "corpus_tokens": 1000000,
+  "tokenizer": "cl100k_base@0.12.0",
+  "max_supply_rounds": 3
+}
+```
+
+Start a new run with this target:
+
+```powershell
+.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --seed-pack path/to/seed.json --delivery-target path/to/target.json --haystack-ratio 9 --semantic-workers 4 --release
+```
+
+V1 reserves three times the final question target by default and revises supply based on line deficits, bounded by `max_supply_rounds`. `--release` uses `examples/release_four.json` to run the four model configurations and remove questions all four answered correctly according to its configured rule.
+
+For a completed V1 generation run, add model evaluation and selection:
+
+```powershell
+.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --run <run_id> --release --from quality
+```
+
+Native four-model scoring does not yet support `L3_process_trace`, so this example uses a six-line target. Runs containing process questions can stop at `quality`. V2 uses a candidate-question target, and the CLI rejects combining it with `--release` or selection-stage options.
+
+</details>
+
+<details>
+<summary>Resume, measurement rules, and engineering configuration</summary>
+
+Resume a run:
+
+```powershell
+.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --run <run_id>
+```
+
+Resuming uses the run's frozen seed, target, and completed stages. Checkpoints within a stage are reused after input and implementation checks. Use a new run to change the seed or delivery target. Production states such as `review_recovery_required`, `design_diagnosis_required`, or `round_limit` require resolving the recorded cause before recovery.
+
+V2 counts candidates by line in `04_questions.json`. Grounded counts, quality eligibility, and native L7 trends are checked separately. When candidate quotas, measured corpus targets, and quality requirements are met, production status is `generation_complete`; review degradation retains artifacts and warnings.
+
+Corpus tokens are counted from document bodies with the named tokenizer and pinned version. The V1 example's `--haystack-ratio 9` sets a character ratio of at least 9:1 between haystack and other body text. The legacy `--target-mchars` flag, including its compatibility alias `--target-mtokens`, also measures characters and cannot be combined with `--delivery-target`. V2 uses `core_tokens`, `corpus_tokens`, and `filler_ratio` in the target file to specify token scales and ratios.
+
+`LLM_CONCURRENCY` limits model requests in flight; `--semantic-workers` controls question review parallelism (1–16). Set `LLM_DEADLINE_S` and `LLM_HTTP_READ_TIMEOUT_S` in `.env` to control each request's total deadline and HTTP read timeout. See `python -m pipeline.factory --help` for all options.
+
+`L3_process` question generation is disabled by default. The main path explicitly enables it with `--process-questions`.
+
+</details>
+
+<details>
+<summary>Repository layout and development checks</summary>
+
+| Path | Contents |
+|---|---|
+| `pipeline/` | World, document, and question generation; quality review, selection, and export |
+| `agent_harnesses/`, `eval/` | Model runners and evaluation system integrations |
+| `configs/`, `schemas/`, `skills/` | Runtime configuration, seed formats, and conversion guides |
+| `examples/`, `assets/readme/` | Configuration examples, case data, and result charts |
+| [services/](services/README.en.md) | Optional gateways, GPU services, and evaluation scripts |
+| `tools/`, `tests/` | Inspection tools and tests |
+
+Dependency lists cover the [core environment](requirements-minimal.txt), [full evaluation environment](requirements.txt), [Mem0 integration](requirements-memory-mem0.txt), and [development checks](requirements-test.txt). Install the set needed for your workflow. With the development dependencies installed, run `python -B tools/verify_repository.py` for regression checks with external network access blocked; logs are saved in `output/repository_verification/`.
+
+</details>
+
+## Case studies
+
+These three questions come from the archived 240-question sample shown in the overview. Animus generated the questions and documents. Timelines summarize the relevant records; model answers and correctness labels retain their archived values. The cases examine the queried object, effective dates, and first changes in recorded fields. Model answers retain their original Chinese wording.
+
+### Case 1: A reopened case and its historical conclusion
 
 Scenario: Legal / merchant compliance review · Capability: Information extraction (IE)
 
@@ -44,9 +241,11 @@ Answer: **证照有效待台账结论** — license valid; ledger conclusion pen
 | GPT-5.3 | 待补证后重核 | Incorrect |
 | DS 0731 | 待补交完整台账 | Incorrect |
 
-DS 0731's answer matches the original case's week 5 conclusion, “complete ledgers still required.” GPT-5.3 answers “awaiting additional evidence before another review.”
+**Analysis.** The question concerns the reopened case created in week 7 and its state in week 11. The week 13 record recalls that case's March 10 conclusion; week 11 registers the arrival of supplemental documents and schedules the review separately. Following that record chain reconstructs the requested state. DS 0731 returns the original case's week 5 conclusion.
 
-### When a report becomes the adopted source
+[Inspect the source documents and four model answers](examples/case_studies.json#L6).
+
+### Case 2: When a report becomes the adopted source
 
 Scenario: Insurance / annual analysis report adoption · Capability: Information extraction (IE)
 
@@ -67,7 +266,11 @@ Answer: **来源记录S21** — source record S21. S22 arrives one week before i
 | GPT-5.3 | 来源记录S21 | Correct |
 | DS 0731 | 来源记录S21 | Correct |
 
-### The first change in evidence sufficiency
+**Analysis.** Receipt is recorded in week 6, and formal adoption changes in week 7. The adoption records establish S21 as the source in week 6. GPT-5.6 returns S22, the source adopted from week 7 onward.
+
+[Inspect the source documents and four model answers](examples/case_studies.json#L89).
+
+### Case 3: The first change in evidence sufficiency
 
 Scenario: Legal / merchant compliance review · Capability: Temporal reasoning (TR)
 
@@ -88,145 +291,6 @@ Answer: **Week 12**. Establish the initial value in week 7, then locate its firs
 | GPT-5.3 | 第12周。 | Correct |
 | DS 0731 | 第7周 | Incorrect |
 
-The first three answers say “week 12”; DS 0731 answers “week 7.”
+**Analysis.** Week 7 establishes the initial field value, week 9 records the arrival of evidence, and week 12 first changes evidence sufficiency to “verified.” Comparing successive values of the same field identifies its first change. DS 0731 returns the week of initial registration.
 
-## Quick start
-
-Requires Python 3.10+. Evaluation with four models also requires Node.js 22.19.0+ and npm. Run commands from the repository root.
-
-### Install
-
-Windows PowerShell:
-
-```powershell
-python -m venv venv
-.\venv\Scripts\python.exe -X utf8 -m pip install -r requirements-minimal.txt
-Copy-Item .env.example .env
-Copy-Item configs/env/secrets.env.example configs/env/secrets.env
-```
-
-<details>
-<summary>Linux / macOS</summary>
-
-```bash
-python3 -m venv venv
-./venv/bin/python -X utf8 -m pip install -r requirements-minimal.txt
-cp .env.example .env
-cp configs/env/secrets.env.example configs/env/secrets.env
-```
-
-</details>
-
-Install the evaluation CLIs:
-
-```bash
-npm install --global @openai/codex@0.153.2 @deepseek-ai/dsh@0.1.2-rc.1
-```
-
-Set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `MODEL` in `.env`; `STRUCTURE_MODEL` can select a separate world design model. Four-model evaluation uses the endpoints in `configs/env/secrets.env` and the [model configuration](examples/release_four.json). See also the [DSH profile](configs/dsh/README.md).
-
-### Generate and select
-
-Prepare a seed JSON using the [schema](schemas/seed_pack_v2.schema.json), [conversion guide](skills/realfiles-to-seedjson/SEEDJSON_GUIDE.md), and [synthetic example](skills/realfiles-to-seedjson/examples/seed_v2_example.json). The seed supplies domain context and constraints. The whitepaper uses the seed, question count, and corpus target to design entities, relations, and business processes over time; the program then validates and executes the instance plan.
-
-Save the delivery target as `path/to/target.json`. This V1 target requests at least 200 questions after four-model selection and at least one million corpus tokens, with a balanced allocation across the six listed production lines. `per_line_min` and `per_line_max` can set bounds for individual lines.
-
-```json
-{
-  "version": 1,
-  "count_stage": "selection_complete",
-  "final_questions": 200,
-  "requested_lines": [
-    "L1_timeline", "L2_relational", "L5_conflict",
-    "L6_refusal", "L7_consolidation", "L8_transition"
-  ],
-  "per_line_min": {},
-  "per_line_max": {},
-  "corpus_tokens": 1000000,
-  "tokenizer": "cl100k_base@0.12.0",
-  "max_supply_rounds": 3
-}
-```
-
-```powershell
-.\venv\Scripts\python.exe -X utf8 tools/validate_seed_packs.py path/to/seed.json --require-generation-ready
-.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --seed-pack path/to/seed.json --delivery-target path/to/target.json --haystack-ratio 9 --semantic-workers 4 --release
-```
-
-The pipeline plans supply by line, generates the world, disclosure schedule, and question orders, then checks the orders and produces formal documents and haystack material. Question wording, grounding, and quality review follow. V1 reserves three times the final question target by default and revises supply based on line deficits, bounded by `max_supply_rounds`.
-
-`--release` uses `examples/release_four.json` to run the four model configurations and apply its rule for removing questions all four answered correctly. For generation and quality review only, omit `--release` and add `--to quality`. On Linux/macOS, use `./venv/bin/python` as the interpreter.
-
-Corpus tokens are counted from document bodies with the named tokenizer and pinned version. The example's `--haystack-ratio 9` still sets a character ratio of at least 9:1 between haystack and other body text. The legacy `--target-mchars` flag, including its compatibility alias `--target-mtokens`, also measures characters and cannot be combined with `--delivery-target`.
-
-Use a V2 target to generate corpus material and candidate questions only. For example, this target evenly allocates 200 candidates across seven lines and requires at least 100,000 formal-document tokens, at least one million total corpus tokens, and a haystack-to-formal token ratio of at least 9:1. The whitepaper uses these targets to design world size and supply structure.
-
-```json
-{
-  "version": 2,
-  "count_stage": "generation_quality",
-  "candidate_questions": 200,
-  "requested_lines": [
-    "L1_timeline", "L2_relational", "L3_process", "L5_conflict",
-    "L6_refusal", "L7_consolidation", "L8_transition"
-  ],
-  "core_tokens": 100000,
-  "corpus_tokens": 1000000,
-  "filler_ratio": 9,
-  "tokenizer": "cl100k_base@0.12.0",
-  "max_supply_rounds": 3
-}
-```
-
-```powershell
-.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --seed-pack path/to/seed.json --delivery-target path/to/target.json --process-questions --semantic-workers 4
-```
-
-V2 stops at `quality` by default and counts candidates by line in `04_questions.json`. Grounded question counts, quality eligibility, and native L7 trends are checked separately. When candidate quotas, measured corpus targets, and quality requirements are met, production status is `generation_complete`; review downgrades retain artifacts and warnings. V2 does not run four-model selection: the CLI rejects `--release` and selection-stage options with this target. Use V1 for a question target after selection.
-
-`LLM_CONCURRENCY` limits model requests in flight; `--semantic-workers` controls question review parallelism (1–16). Set `LLM_DEADLINE_S` and `LLM_HTTP_READ_TIMEOUT_S` in `.env` to control each request's total deadline and HTTP read timeout. See `python -m pipeline.factory --help` for all options.
-
-### Resume
-
-```powershell
-.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --run <run_id>
-```
-
-Resuming uses the run's frozen seed, target, and completed stages. Checkpoints within a stage are reused after input and implementation checks. Use a new run to change the seed or delivery target. Production states such as `review_recovery_required`, `design_diagnosis_required`, or `round_limit` require resolving the recorded cause before recovery.
-
-For a completed V1 generation run, add model evaluation and selection:
-
-```powershell
-.\venv\Scripts\python.exe -X utf8 -m pipeline.factory --run <run_id> --release --from quality
-```
-
-`L3_process` question generation is disabled by default and can be enabled with `--process-questions`. Native four-model scoring does not yet support `L3_process_trace`, so the selection example uses a six-line target. Runs containing process questions can stop at `quality`.
-
-### Output
-
-Results are saved in `output/runs/<run_id>/`:
-
-| File | Contents |
-|---|---|
-| `manifest.json`, `11_production.json` | Stage status, frozen configuration, and supply rounds |
-| `01_whitepaper.json`, `02_world.json` | World design and executed business facts |
-| `03_orders.json`, `04_questions.json` | Question orders and formed candidates |
-| `05_corpus.json`, `05_corpus_token_scale.json` | Corpus documents and actual token counts for formal documents and haystack |
-| `06_grounded_questions.json`, `07_release.json` | Grounded questions, question review results, and quality eligibility |
-| `08_calibration.json`, `09_selection.json` | Four-model evaluation status and selection results |
-| `10_delivery_target.json` | Measured line counts and corpus size against the delivery target |
-
-Review degradation preserves candidates and warnings and is reflected in quality eligibility and delivery reports. The `eligible` field in `07_release.json` records quality eligibility; `10_delivery_target.json` and `11_production.json` report target attainment. When selection yields deliverable questions, the standard package is under `delivery/<attempt>/benchmark/` within that run directory.
-
-## Repository layout
-
-| Path | Contents |
-|---|---|
-| `pipeline/` | World, document, and question generation; quality review, selection, and export |
-| `agent_harnesses/`, `eval/` | Model runners and evaluation system integrations |
-| `configs/`, `schemas/`, `skills/` | Runtime configuration, seed formats, and conversion guides |
-| `examples/`, `assets/readme/` | Configuration examples, case data, and result charts |
-| [services/](services/README.en.md) | Optional gateways, GPU services, and evaluation scripts |
-| `tools/`, `tests/` | Inspection tools and tests |
-
-Dependency lists cover the [core environment](requirements-minimal.txt), [full evaluation environment](requirements.txt), [Mem0 integration](requirements-memory-mem0.txt), and [development checks](requirements-test.txt). Install the set needed for your workflow. With the development dependencies installed, run `python -B tools/verify_repository.py` for regression checks with external network access blocked; logs are saved in `output/repository_verification/`.
+[Inspect the source documents and four model answers](examples/case_studies.json#L154).

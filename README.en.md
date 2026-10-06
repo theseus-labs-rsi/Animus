@@ -31,11 +31,11 @@
 
 ### ⚡ 03 · An integrated interface from generation to evaluation
 
-> Filter questions through model trial runs, export **standardized benchmark packages**, and evaluate complete Agent systems for accuracy, failure types, and usage costs.
+> **Optional:** filter questions through model trial runs, export **standardized benchmark packages**, and evaluate complete Agent systems for accuracy, failure types, and usage costs.
 
 ---
 
-<p align="center"><strong>Define scenarios and capabilities → Build worlds → Generate questions → Filter through trial runs → Export and evaluate</strong></p>
+<p align="center"><strong>Define scenarios and capabilities → Build worlds → Generate questions → Filter through trial runs (optional) → Export and evaluate (optional)</strong></p>
 
 ## Evaluation results
 

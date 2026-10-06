@@ -9,7 +9,7 @@
 
 <p align="center">Build evaluation environments driven by a shared world state, from user-defined scenarios and target capabilities.</p>
 
-<p align="center"><a href="#demo-video">Demo video</a> · <a href="#core-capabilities">Core capabilities</a> · <a href="#quick-start">Quick start</a> · <a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd">Project introduction</a></p>
+<p align="center"><a href="#demo-video">Demo video</a> · <a href="#core-capabilities">Core capabilities</a> · <a href="#quick-start">Quick start</a></p>
 
 ## Demo video
 
@@ -17,7 +17,7 @@
   <a href="assets/readme/animus-demo.mp4"><img src="assets/readme/animus-preview.gif" alt="Animated preview of the Animus world engine. Click to watch the full demo video (in Chinese)." width="820"></a>
 </p>
 
-<p align="center"><a href="assets/readme/animus-demo.mp4"><strong>▶ Watch the full demo</strong></a> · <a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd#doxcn0oVODB0MpqfHEnxNlCkXHd">Original video in Feishu</a> (in Chinese)</p>
+<p align="center"><a href="assets/readme/animus-demo.mp4"><strong>▶ Watch the full demo</strong></a> (in Chinese)</p>
 
 ## Core capabilities
 
@@ -323,4 +323,4 @@ Answer: **Week 12**. Establish the initial value in week 7, then locate its firs
 
 ---
 
-<p align="center"><strong>What would you like to evaluate in the next world?</strong><br>Demo video and animated preview from the <a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd">project introduction document</a> (in Chinese).</p>
+<p align="center"><strong>What would you like to evaluate in the next world?</strong></p>

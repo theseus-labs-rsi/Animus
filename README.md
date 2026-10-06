@@ -9,7 +9,7 @@
 
 <p align="center">根据用户定义的场景与目标能力，自动构建由统一世界状态驱动的评测环境。</p>
 
-<p align="center"><a href="#演示视频">演示视频</a> · <a href="#核心功能">核心功能</a> · <a href="#快速开始">快速开始</a> · <a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd">项目介绍</a></p>
+<p align="center"><a href="#演示视频">演示视频</a> · <a href="#核心功能">核心功能</a> · <a href="#快速开始">快速开始</a></p>
 
 ## 演示视频
 
@@ -17,7 +17,7 @@
   <a href="assets/readme/animus-demo.mp4"><img src="assets/readme/animus-preview.gif" alt="Animus 世界引擎动态预览：一句话，生成一个世界。点击观看完整演示视频。" width="820"></a>
 </p>
 
-<p align="center"><a href="assets/readme/animus-demo.mp4"><strong>▶ 观看完整演示视频</strong></a> · <a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd#doxcn0oVODB0MpqfHEnxNlCkXHd">飞书视频原文</a></p>
+<p align="center"><a href="assets/readme/animus-demo.mp4"><strong>▶ 观看完整演示视频</strong></a></p>
 
 ## 核心功能
 
@@ -323,4 +323,4 @@ V2 按 `04_questions.json` 中各线候选题计数，接地后题量、质量�
 
 ---
 
-<p align="center"><strong>下一个世界，你想测评什么？</strong><br>演示视频与动态预览来自<a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd">项目介绍文档</a>。</p>
+<p align="center"><strong>下一个世界，你想测评什么？</strong></p>

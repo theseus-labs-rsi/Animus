@@ -248,7 +248,7 @@ Dependency lists cover the [core environment](requirements-minimal.txt), [full e
 <summary>Explore three cases: historical conclusions, source changes, and state transitions</summary>
 
 
-These three questions come from the archived 240-question sample shown in the overview. Animus generated the questions and documents. Timelines summarize the relevant records; model answers and correctness labels retain their archived values. The cases examine the queried object, effective dates, and first changes in recorded fields. Model answers retain their original Chinese wording.
+These three questions come from the archived 240-question sample shown in the Evaluation results section. Animus generated the questions and documents. Timelines summarize the relevant records; model answers and correctness labels retain their archived values. The cases examine the queried object, effective dates, and first changes in recorded fields. Model answers retain their original Chinese wording.
 
 ### Case 1: A reopened case and its historical conclusion
 

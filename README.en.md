@@ -1,20 +1,39 @@
-# Animus
+<h1 align="center">ANIMUS</h1>
+
+<p align="center"><strong>Generate worlds. Generate challenges.</strong></p>
 
 <p align="center">
   <a href="README.md"><img src="assets/readme/language/zh.svg" alt="切换到中文" width="96" height="34"></a>
   <a href="README.en.md"><img src="assets/readme/language/en-active.svg" alt="English (current language)" width="96" height="34"></a>
 </p>
 
-<p align="center"><strong>Generate evolving domain documents and evidence-grounded evaluation questions from a domain seed.</strong></p>
+<p align="center">Build evaluation environments driven by a shared world state, from user-defined scenarios and target capabilities.</p>
 
-<p align="center"><a href="#overview">Overview</a> · <a href="#quick-start">Quick start</a> · <a href="#case-studies">Case studies</a></p>
+<p align="center"><a href="#demo-video">Demo video</a> · <a href="#core-capabilities">Core capabilities</a> · <a href="#quick-start">Quick start</a> · <a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd">Project introduction</a></p>
 
-## Overview
+## Demo video
 
-Animus is a benchmark generation pipeline. You provide a domain seed and targets for question count and corpus size. The whitepaper plans the world and supply by production line; the pipeline generates documents over time, haystack material, and evaluation questions, retaining evidence and review results. Optional stages run four-model evaluation, remove easy questions, and export a standard benchmark package.
+<p align="center">
+  <a href="assets/readme/animus-demo.mp4"><img src="assets/readme/animus-preview.gif" alt="Animated preview of the Animus world engine. Click to watch the full demo video (in Chinese)." width="820"></a>
+</p>
 
-> **Generation:** seed and target → world and supply design → business facts and question orders → corpus and candidate questions → grounding and quality review<br>
-> **Optional:** four-model evaluation → easy-question selection → standard benchmark package
+<p align="center"><a href="assets/readme/animus-demo.mp4"><strong>▶ Watch the full demo</strong></a> · <a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd#doxcn0oVODB0MpqfHEnxNlCkXHd">Original video in Feishu</a> (in Chinese)</p>
+
+## Core capabilities
+
+| | Capability | Description |
+| :---: | :--- | :--- |
+| **01** | **Scenario-native world modeling** | Build executable world models from domain rules and task requirements, generating mutually consistent evaluation materials. |
+| **02** | **Capability-driven question generation** | Generate questions and reference answers around target capabilities, with configurable capability coverage, question counts, and data scale. |
+| **03** | **An integrated interface from generation to evaluation** | Filter questions through model trial runs, export standardized benchmark packages, and evaluate complete Agent systems for accuracy, failure types, and usage costs. |
+
+<p align="center"><strong>Define scenarios and capabilities → Build worlds → Generate questions → Filter through trial runs → Export and evaluate</strong></p>
+
+## Evaluation results
+
+<details>
+<summary>Explore model results and capability coverage across four domains and 240 questions</summary>
+
 
 ### Model evaluation results
 
@@ -36,7 +55,13 @@ The upper panel shows the question distribution across domains and capability ca
 
 *Figure 2 | Domain and capability coverage, followed by capability-level evaluation results. The three case studies below come from this 240-question sample.*
 
+</details>
+
 ## Quick start
+
+<details>
+<summary>Expand the installation, configuration, and generation guide (Python 3.10+)</summary>
+
 
 This path uses a V2 target to generate corpus material and candidate questions, then complete quality review. It requires **Python 3.10+**. Run commands from the repository root; on Linux/macOS, use `./venv/bin/python` as the interpreter.
 
@@ -207,7 +232,13 @@ Dependency lists cover the [core environment](requirements-minimal.txt), [full e
 
 </details>
 
+</details>
+
 ## Case studies
+
+<details>
+<summary>Explore three cases: historical conclusions, source changes, and state transitions</summary>
+
 
 These three questions come from the archived 240-question sample shown in the overview. Animus generated the questions and documents. Timelines summarize the relevant records; model answers and correctness labels retain their archived values. The cases examine the queried object, effective dates, and first changes in recorded fields. Model answers retain their original Chinese wording.
 
@@ -287,3 +318,9 @@ Answer: **Week 12**. Establish the initial value in week 7, then locate its firs
 **Analysis.** Week 7 establishes the initial field value, week 9 records the arrival of evidence, and week 12 first changes evidence sufficiency to “verified.” Comparing successive values of the same field identifies its first change. DS 0731 returns the week of initial registration.
 
 [Inspect the source documents and four model answers](examples/case_studies.json#L154).
+
+</details>
+
+---
+
+<p align="center"><strong>What would you like to evaluate in the next world?</strong><br>Demo video and animated preview from the <a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd">project introduction document</a> (in Chinese).</p>

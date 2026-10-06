@@ -1,20 +1,39 @@
-# Animus
+<h1 align="center">ANIMUS</h1>
+
+<p align="center"><strong>生成世界，也生成挑战。</strong></p>
 
 <p align="center">
   <a href="README.md"><img src="assets/readme/language/zh-active.svg" alt="中文（当前语言）" width="96" height="34"></a>
   <a href="README.en.md"><img src="assets/readme/language/en.svg" alt="Switch to English" width="96" height="34"></a>
 </p>
 
-<p align="center"><strong>从领域 seed 生成随时间演变的文档语料与有材料依据的评测题。</strong></p>
+<p align="center">根据用户定义的场景与目标能力，自动构建由统一世界状态驱动的评测环境。</p>
 
-<p align="center"><a href="#概览">概览</a> · <a href="#快速开始">快速开始</a> · <a href="#具体案例分析">具体案例分析</a></p>
+<p align="center"><a href="#演示视频">演示视频</a> · <a href="#核心功能">核心功能</a> · <a href="#快速开始">快速开始</a> · <a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd">项目介绍</a></p>
 
-## 概览
+## 演示视频
 
-Animus 是一条 benchmark 生成流水线。你提供领域 seed 和题量、语料规模目标，白皮书据此规划世界与逐线供给，系统生成跨期文档、草堆和评测题，并保存材料依据与审查结果。可继续运行四模型试答、易题筛选和标准 benchmark 导出。
+<p align="center">
+  <a href="assets/readme/animus-demo.mp4"><img src="assets/readme/animus-preview.gif" alt="Animus 世界引擎动态预览：一句话，生成一个世界。点击观看完整演示视频。" width="820"></a>
+</p>
 
-> **生成：** seed 与目标 → 世界与供给设计 → 业务事实与订单 → 语料与候选题 → 接地与质量审查<br>
-> **可选：** 四模型试答 → 易题筛选 → 标准 benchmark 包
+<p align="center"><a href="assets/readme/animus-demo.mp4"><strong>▶ 观看完整演示视频</strong></a> · <a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd#doxcn0oVODB0MpqfHEnxNlCkXHd">飞书视频原文</a></p>
+
+## 核心功能
+
+| | 功能 | 介绍 |
+| :---: | :--- | :--- |
+| **01** | **场景原生的世界建模** | 根据领域规则和任务需求构建可执行的世界模型，生成相互一致的评测材料。 |
+| **02** | **能力驱动的题目供给** | 围绕目标能力生成题目与参考答案，支持自定义能力覆盖、题目数量和数据规模。 |
+| **03** | **从生成到评测的一体化接口** | 通过模型试答筛选题目，导出标准化评测包，并评估完整 Agent 系统的准确率、失败类型与使用成本。 |
+
+<p align="center"><strong>定义场景与能力 → 构建世界 → 生成题目 → 试答筛选 → 导出与评测</strong></p>
+
+## 评测结果
+
+<details>
+<summary>查看四领域、240 道题的模型试答与能力覆盖</summary>
+
 
 ### 模型试答结果
 
@@ -36,7 +55,13 @@ Animus 是一条 benchmark 生成流水线。你提供领域 seed 和题量、�
 
 *图 2｜领域与能力覆盖、逐能力试答成绩。后文三个案例选自这份 240 题样本。*
 
+</details>
+
 ## 快速开始
+
+<details>
+<summary>展开安装、配置与生成指南（Python 3.10+）</summary>
+
 
 以下路径使用 V2 目标，完成语料、候选题生成与质量审查。需要 **Python 3.10+**，在仓库根目录执行命令；使用 Linux/macOS 时，将解释器替换为 `./venv/bin/python`。
 
@@ -207,7 +232,13 @@ V2 按 `04_questions.json` 中各线候选题计数，接地后题量、质量�
 
 </details>
 
+</details>
+
 ## 具体案例分析
+
+<details>
+<summary>查看三个案例：历史结论、来源切换与状态变化</summary>
+
 
 以下三题来自概览中的 240 题归档样本。题目与材料均由 Animus 生成，时间线摘述关键记录，模型回答和判定保留原值。重点看查询对象、业务生效时间和字段首次变更如何影响答案。
 
@@ -287,3 +318,9 @@ V2 按 `04_questions.json` 中各线候选题计数，接地后题量、质量�
 **分析。** 第 7 周登记了字段初始值，第 9 周登记材料到达，第 12 周首次将证据充分性更新为“已核验”。需要比较同一字段前后的取值，找到首次变更。DS 0731 回答的第 7 周对应初始登记时间。
 
 [查看本题的原始材料与四模型回答](examples/case_studies.json#L154)。
+
+</details>
+
+---
+
+<p align="center"><strong>下一个世界，你想测评什么？</strong><br>演示视频与动态预览来自<a href="https://my.feishu.cn/wiki/UonawzqIFiLExGkXVadcdMTCnUd">项目介绍文档</a>。</p>

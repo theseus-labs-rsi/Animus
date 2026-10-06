@@ -21,11 +21,19 @@
 
 ## Core capabilities
 
-| | Capability | Description |
-| :---: | :--- | :--- |
-| **01** | **Scenario-native world modeling** | Build executable world models from domain rules and task requirements, generating mutually consistent evaluation materials. |
-| **02** | **Capability-driven question generation** | Generate questions and reference answers around target capabilities, with configurable capability coverage, question counts, and data scale. |
-| **03** | **An integrated interface from generation to evaluation** | Filter questions through model trial runs, export standardized benchmark packages, and evaluate complete Agent systems for accuracy, failure types, and usage costs. |
+### 🌐 01 · Scenario-native world modeling
+
+> Build **executable world models** from domain rules and task requirements, generating mutually consistent evaluation materials.
+
+### 🎯 02 · Capability-driven question generation
+
+> Generate **questions and reference answers** around target capabilities, with configurable capability coverage, question counts, and data scale.
+
+### ⚡ 03 · An integrated interface from generation to evaluation
+
+> Filter questions through model trial runs, export **standardized benchmark packages**, and evaluate complete Agent systems for accuracy, failure types, and usage costs.
+
+---
 
 <p align="center"><strong>Define scenarios and capabilities → Build worlds → Generate questions → Filter through trial runs → Export and evaluate</strong></p>
 
